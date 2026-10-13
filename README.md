@@ -567,6 +567,40 @@ L18 用真实的 `MigrationProbe` 走了一遍全流程：写 YAML → 迁移 �
 回归项 **M11c** 是这条的哨兵：删掉 `Compound.feedback.sounds.select` 后仍必须发声，
 不依赖测试服磁盘上那份 `config.yml`，将来把配置刷成全量配置也照样守着。
 
+### 19b. ⚠️【与 19 同源，更凶险】`getConfigurationSection(缺键)` 会凭空造一个空段，永远不为 null
+
+**症状**：想给某个「列表 / 嵌套段」型配置留代码内置默认值时，很自然会写成：
+
+```java
+ConfigurationSection sec = getConfig().getConfigurationSection("Compound.xxx.rewards");
+if (sec == null) { /* 用代码内置默认 */ }   // ← 这个分支永远不会进
+```
+
+**`null` 兜底永远不会触发。** `MemorySection#getConfigurationSection` 在键不存在时会
+`createSection(path)` **凭空造一个空段返回**（已在 CatServer 1.12.2 自带的
+`org.bukkit.configuration` 上用 `javap -c` 反编译确认），于是控制流永远走 else，
+读出来是**一个空列表**。
+
+实测中招案例（第四轮图鉴）：测试服磁盘上的 `config.yml` 是老配置、没有 `Compound.dex` 段，
+界面上显示「奖励档位: **0** 个」，玩家永远领不到里程碑奖励 —— 而**日志上一点线索都没有**，
+只能靠端到端断言把它捞出来。
+
+**正确写法**：不要用 `getConfigurationSection(path) == null` 判存在性，要用
+`isConfigurationSection(path)` / `contains(path)` **正着判**：
+
+```java
+// ① 推荐：单参 isConfigurationSection 会回退到 jar 内置默认，
+//    所以「磁盘缺键、jar 内置有段」时照样返回 true
+if (!getConfig().isConfigurationSection("Compound.xxx.rewards")) {
+    return defaults();
+}
+// ② 键确实存在，再逐条读（逐子键都走单参 / 双参，语义见 19 条）
+```
+
+**约定（新增配置读取必须遵守）**：凡是「缺键时想回退到代码内置默认」的地方，
+一律用 `isConfigurationSection` / `contains` 判存在性，**禁止**用
+`getConfigurationSection(...) == null` 当条件 —— 它是个恒假条件。
+
 ## 配置一览（第三轮新增键）
 
 | 键 | 默认 | 说明 |
