@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.mc9y</groupId>
+        <artifactId>pokeutils-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>pokeutils-stub-api</artifactId>
+    <packaging>jar</packaging>
+
+    <name>PokeUtils :: Stub API</name>
+    <description>
+        仅用于编译的第三方 API 桩（Pixelmon / PokeStar / PokemonAPI / MSGToggle / Blank038API / NMS / Vault）。
+        这些类不会被打进 PokeUtils 插件，运行期由服务端上的真实插件与模组提供。
+        若本地已有真实插件 jar，可用 README 中的 profile 替换本模块。
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.spigotmc</groupId>
+            <artifactId>spigot-api</artifactId>
+            <version>1.12.2-R0.1-SNAPSHOT</version>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+</project>

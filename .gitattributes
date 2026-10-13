@@ -1,0 +1,13 @@
+# 统一换行符：本工程在 Windows 上开发，克隆到 Linux/macOS 后要能直接构建。
+# 所有文本文件一律以 LF 入库，避免检出时被自动转成 CRLF（会让 *.sh 无法执行）。
+* text=auto eol=lf
+
+# 二进制文件不做任何转换
+*.jar  binary
+*.class binary
+*.png  binary
+*.jpg  binary
+
+# Windows 批处理必须保留 CRLF
+*.bat  text eol=crlf
+*.cmd  text eol=crlf

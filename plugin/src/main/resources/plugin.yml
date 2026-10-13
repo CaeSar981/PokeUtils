@@ -1,0 +1,33 @@
+name: PokeUtils
+main: com.mc9y.pokeutils.PokeUtils
+depend:
+  - PokeStar
+  - Vault
+  - PokeStatsAPI
+  - PokemonAPI
+  - MSGToggle
+version: 1.0
+commands:
+  pokeutils:
+    aliases:
+      - pu
+      - putils
+      - pokeu
+    description: Command for PokeUtils
+permissions:
+  # 说明：原 plugin.yml 里没有 permissions 段，插件用到的权限节点只能靠管理员
+  # 在权限插件里手写字符串；这里把它们声明出来，配置界面里就能直接看到。
+  # 注意「是否需要 pokeutils.use」由 config.yml 的 Compound.use-permission 决定，
+  # 留空则所有人可用（与原插件行为一致）。
+  pokeutils.use:
+    description: 允许使用 /pu compound 打开合成界面（默认所有人可用，除非配置要求）
+    default: true
+  pokeutils.admin:
+    description: 允许使用 /pu g、/pu take、/pu bal <他人>、/pu reload 等管理指令
+    default: op
+  vip.yx:
+    description: 合成七星失败时保留一只精灵（优秀训练师）。节点名可在 config.yml 的 VIP.keep-one 中调整
+    default: false
+  vip.cs:
+    description: 合成七星失败时保留一只精灵（传说训练师）。节点名可在 config.yml 的 VIP.keep-one 中调整
+    default: false

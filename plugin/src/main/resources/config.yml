@@ -1,0 +1,192 @@
+Info:
+  name: "&3精灵合成使用方法"
+  lore:
+    - "§b"
+    - " &3&k||&a 使用2个低星级精灵可合成1个高星级精灵 "
+    - " &3&k||&a 每次合成都会消耗2只同星级精灵 + 1个粘剂"
+    - " &3&k||&a 最高只能合成至7星精灵, 七星精灵无法再合成"
+    - " &3&k||&a 每次合成都会消耗一定数量的金币"
+    # 「{price}」会被替换成按 Compound.price 自动生成的价格表（六行）。
+    # 把它删掉就不会显示价格 —— 说明书里的价格不会再和实际扣费脱节。
+    - "{price}"
+    - " &3&k||&a 如果合成七星失败, 优秀训练师/传说训练师将会保留一只精灵"
+    - "§d"
+
+VIP:
+  # 合成七星失败时，拥有以下任一权限节点的玩家会随机保留一只精灵。
+  # 注：原插件这一处写成了 vip.yx || vip.yx（同一节点写了两遍），第二个节点已无从得知，
+  #     故在此做成可配置项，按「优秀训练师 / 传说训练师」补为以下两条，可自行调整。
+  keep-one:
+    - "vip.yx"
+    - "vip.cs"
+
+Compound:
+  # 本段所有数值都可以用 `/pu reload` 热重载，无需重启服务器。
+  # 缺省值与原实现完全一致，所以旧的配置文件（没有本段）行为与本插件重写前一模一样。
+
+  # 金币消耗。key = 作为原料的星级，即 1 表示「一星 -> 二星」。
+  price:
+    1: 1000
+    2: 10000
+    3: 30000
+    4: 100000
+    5: 400000
+    6: 1000000
+
+  # 基础成功率（%）。key = 作为原料的星级。
+  # 原实现是公式 (11 - 星级 - 3) * 10，展开后正是下面这组值。
+  base-rate:
+    1: 70
+    2: 60
+    3: 50
+    4: 40
+    5: 30
+    6: 20
+
+  # 粘剂列表（修复：原本 PT / JL 硬编码在代码的六处 switch 里，加一种粘剂必须重新编译）。
+  # 想加一种「传说粘剂」只需在这里追加一项，界面、点击判定、成功率都会自动跟上。
+  #   key          存储键，也是数据库里的列名，别改已上线粘剂的 key（会读不到旧数据）
+  #   display      界面显示名
+  #   material     Bukkit 材质名
+  #   potion       可选，写入药水的 Potion NBT（做「水瓶」外观用），不需要就删掉这一行
+  #   rate         使用后提供的成功率加成（%）
+  #   insufficient 数量不足时的提示文案（会接在「你没有足够的」后面）
+  #   slot         可选，粘剂选择界面上的槽位；不写则从 19 起依次递增（原实现即 19 / 20）
+  stickers:
+    - key: PT
+      display: "§f普通粘剂"
+      material: POTION
+      potion: "minecraft:water"
+      rate: 10
+      insufficient: "§f 普通粘剂"
+    - key: JL
+      display: "§a精良粘剂"
+      material: DRAGONS_BREATH
+      rate: 30
+      insufficient: "§a 精良粘剂"
+
+  # 合成失败时，返还已消耗金币的百分比。
+  # 注：只有 Compound.refund.mode 含「money」时才生效。
+  refund-percent: 20
+
+  # 合成失败补偿方式（本次新增）：
+  #   money   只返金币（默认，与原实现一致）
+  #   sticker 只送粘剂
+  #   both    两者都给
+  # 金币对已经投入很多的玩家来说是最没感觉的补偿；配成 sticker 之后，
+  # 玩家手里会多一次可用于下一次合成的资源，继续玩下去的意愿完全不同。
+  refund:
+    mode: money
+    # mode 含 sticker 时送哪种粘剂（键名取自 Compound.stickers）。
+    sticker-type: PT
+    sticker-amount: 1
+    # 只有材料星级 >= 本值时才送粘剂（0 = 不限）。设成 3 就是「只补三星以上的失败」。
+    min-star: 0
+
+  # 连续失败保底：同一玩家连续失败达到 threshold 次后，下一次必定成功。
+  # 计数按玩家持久化在 SQLite（plugins/PokeUtils/pokeutils.db），成功后清零。
+  # enabled 设为 false，或 threshold 设为 0，即可关闭。
+  pity:
+    enabled: true
+    threshold: 5
+    # 失败后的进度提示方式（本次新增）：
+    #   chat      聊天栏消息（默认）
+    #   actionbar 物品栏上方的动作栏文字（走反射，服务端不支持时自动回落 chat）
+    #   both      两者都发
+    #   none      不提示
+    notify: chat
+    # 占位符: {streak} 当前连败次数 / {threshold} 保底阈值 / {left} 还差几次
+    message: "§e连续失败 §f{streak} §e/ §f{threshold} §7· 再失败 §f{left} §7次必定成功"
+
+  # 高星合成成功时的全服播报（走 MSGToggle 的 flow view）。
+  # 原实现写死为「>=6 星」且文案不可改，这里抽成配置。
+  # 文案占位符：{player} 玩家名、{star} 星级显示名（如 §c七星精灵）、{pokemon} 精灵名。
+  broadcast:
+    enabled: true
+    min-star: 6
+    message: "§a恭喜玩家 §f{player} §a合成出了一只 §f{star} §f{pokemon}"
+
+  # 合成冷却（毫秒）。防止连点器 / 宏在一瞬间连点合成按钮。
+  # 0 = 不限制。玩家在冷却内点击不会有任何消耗，只会收到一条提示。
+  cooldown-ms: 0
+
+  # 放入高星材料时的二次确认：两只材料星级都达到本值时，需要再点一次确认才会真正合成。
+  # 0 = 关闭。设为 5 表示五星及以上。用于防止手滑把六星精灵直接烧掉。
+  confirm-min-star: 5
+
+  # 合成配方（本次新增，默认值与原来一致）：
+  #   material-count    需要放入的同星级精灵数量（1 或 2）
+  #   sticker-required  是否必须放入粘剂；false 时粘剂变成可选加成
+  material-count: 2
+  sticker-required: true
+
+  # 权限组折扣与加成（本次新增）。按顺序取「第一个命中的权限组」，不做叠加 ——
+  # 叠加会让多重继承的玩家算出一个谁也说不清的数。
+  # 默认留空，即不改变任何行为。示例：
+  #   groups:
+  #     - permission: "group.vip"
+  #       price-multiplier: 0.8    # 金币消耗打八折
+  #       rate-bonus: 5            # 成功率 +5%
+  #     - permission: "group.mvp"
+  #       price-multiplier: 0.5
+  #       rate-bonus: 10
+  groups: []
+
+  # 合成券（本次新增）：一种可以直接顶一次合成的金币消耗的物品。
+  # 背包里有匹配的券时，合成优先扣券、不扣金币。适合做活动、补偿、礼包 ——
+  # 不动经济系统，也不会像直接发金币那样立刻造成通胀。
+  # 默认留空。示例：
+  #   vouchers:
+  #     - material: PAPER            # 必填，Bukkit 材质名
+  #       name: "§d高级合成券"        # 可选，精确匹配显示名（含颜色代码）
+  #       lore-keyword: "合成券"      # 可选，lore 里必须包含的关键字
+  #       star-limit: 4              # 可选，0 = 不限；4 = 只能用于四星及以下的合成
+  #       display: "§d高级合成券"     # 可选，提示文案里怎么称呼它
+  vouchers: []
+
+  # 产出预览（本次新增）：合成界面上的「产出预览」按钮，列出目标档位的全部可能产出。
+  # 数据取自真实 PokeStar 的产出表，所以预览里有的就是能合出来的。
+  preview:
+    enabled: true
+    page-size: 45
+
+  # 合成流水日志：每次合成都往 plugins/PokeUtils/logs/compound-<日期>.log 追加一行。
+  # 用于事后处理纠纷、复盘经济产出。字段用制表符分隔，方便直接丢进表格软件。
+  #   /pu history 读它查玩家记录，/pu stats 与 /pu top 在它上面做聚合。
+  log:
+    enabled: true
+    # 启动时清理超过本天数的日志文件（0 = 不清理）。日志按天分文件但从不清理的话，
+    # 长期运行会一直堆积。
+    keep-days: 30
+
+  # /pu history 与 /pu stats 的行为（本次新增）。
+  history:
+    # 默认显示多少条记录（上限 50）
+    size: 10
+    # 统计类命令最多往回扫多少行日志，防止日志很大时把主线程卡住
+    max-scan-lines: 50000
+
+  # 界面反馈（本次新增）：音效与成功 Title。
+  # 音效名用 Bukkit 的 Sound 枚举名；留空表示该处不发声。
+  # 注意：1.12.2 的 spigot-api 没有 Player#sendActionBar，pity.notify 的 actionbar
+  #       是走反射尝试的，服务端没有就自动回落成聊天消息。
+  feedback:
+    sounds:
+      open: BLOCK_CHEST_OPEN
+      select: UI_BUTTON_CLICK
+      success: ENTITY_PLAYER_LEVELUP
+      fail: BLOCK_ANVIL_LAND
+      volume: 1.0
+      pitch: 1.0
+    title:
+      enabled: true
+      title: "§a合成成功"
+      subtitle: "§f{star} §f{pokemon}"
+      fade-in: 5
+      stay: 30
+      fade-out: 10
+
+  # 打开合成界面的权限节点。留空 = 任何人可用。
+  # 填上节点名（例如 pokeutils.use）后，玩家需要拥有该节点才能执行 /pu compound。
+  # 注意：权限节点本身已写在 plugin.yml 里，可被权限插件直接识别。
+  use-permission: ""

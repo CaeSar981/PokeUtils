@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.mc9y</groupId>
+        <artifactId>pokeutils-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>PokeUtils</artifactId>
+    <packaging>jar</packaging>
+
+    <name>PokeUtils</name>
+
+    <dependencies>
+        <!-- 服务端 API（provided：服务端自带，不打包） -->
+        <dependency>
+            <groupId>org.spigotmc</groupId>
+            <artifactId>spigot-api</artifactId>
+            <version>1.12.2-R0.1-SNAPSHOT</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!--
+          第三方 API 编译桩（provided：仅编译期可见，不会打进最终 jar）。
+          运行期这些类由服务端上的 Pixelmon 模组与各插件（PokeStar / PokemonAPI /
+          MSGToggle / Blank038API / Vault）提供。
+
+          如果你更希望直接针对真实插件 jar 编译，把本依赖注释掉，
+          并取消下面「真实依赖」区块的注释、把 jar 放进 ../libs/ 目录。
+        -->
+        <dependency>
+            <groupId>com.mc9y</groupId>
+            <artifactId>pokeutils-stub-api</artifactId>
+            <version>${project.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- ================= 真实依赖（可选） =================
+        <dependency>
+            <groupId>com.mc9y</groupId>
+            <artifactId>PokeStar</artifactId>
+            <version>1.0</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/../libs/PokeStar.jar</systemPath>
+        </dependency>
+        <dependency>
+            <groupId>com.mc9y</groupId>
+            <artifactId>PokemonAPI</artifactId>
+            <version>1.0</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/../libs/PokemonAPI.jar</systemPath>
+        </dependency>
+        <dependency>
+            <groupId>com.mc9y</groupId>
+            <artifactId>Blank038API</artifactId>
+            <version>1.0</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/../libs/Blank038API.jar</systemPath>
+        </dependency>
+        <dependency>
+            <groupId>com.mc9y</groupId>
+            <artifactId>MSGToggle</artifactId>
+            <version>1.0</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/../libs/MSGToggle.jar</systemPath>
+        </dependency>
+        <dependency>
+            <groupId>com.pixelmonmod</groupId>
+            <artifactId>Pixelmon</artifactId>
+            <version>1.12.2</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/../libs/Pixelmon.jar</systemPath>
+        </dependency>
+        <dependency>
+            <groupId>com.github.MilkBowl</groupId>
+            <artifactId>VaultAPI</artifactId>
+            <version>1.7</version>
+            <scope>provided</scope>
+        </dependency>
+        ================= 真实依赖（可选） ================= -->
+    </dependencies>
+
+    <build>
+        <finalName>PokeUtils-${project.version}</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <configuration>
+                    <archive>
+                        <manifestEntries>
+                            <Implementation-Title>PokeUtils</Implementation-Title>
+                            <Implementation-Version>${project.version}</Implementation-Version>
+                        </manifestEntries>
+                    </archive>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
