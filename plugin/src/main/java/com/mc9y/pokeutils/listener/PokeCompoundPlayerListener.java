@@ -236,6 +236,20 @@ public class PokeCompoundPlayerListener implements Listener {
                                                 // 金币，经济插件挂掉时不该顺带把「用券合成」也一起废掉。
                                                 int voucherSlot = PokeUtils.getInstance().findVoucherSlot(p, star1);
                                                 boolean useVoucher = voucherSlot >= 0;
+                                                // 新增：用券合成时先留一份券的快照 —— 合成失败要原样还回去。
+                                                // 在消耗之前取，是因为 consumeVoucherAt 会把数量减 1（或清空槽位）。
+                                                ItemStack voucherSnapshot = null;
+                                                if (useVoucher) {
+                                                    try {
+                                                        ItemStack raw = p.getInventory().getItem(voucherSlot);
+                                                        if (raw != null) {
+                                                            voucherSnapshot = raw.clone();
+                                                            voucherSnapshot.setAmount(1);
+                                                        }
+                                                    } catch (Throwable ignored) {
+                                                        // 拿不到快照就退不了券，但合成流程不该因此中断。
+                                                    }
+                                                }
 
                                                 // 修复（新增防护）：Vault 装上了但没有可用的经济插件时，
                                                 // economy 是 null，原实现直接 economy.getBalance(...) 会抛空指针。
@@ -336,6 +350,18 @@ public class PokeCompoundPlayerListener implements Listener {
                                                             failMsg.append(", 并返还 ").append(stickerRefund)
                                                                     .append(" 个").append(refundSticker.getDisplay());
                                                         }
+                                                        // 新增（经济）：用券失败时把券退还。
+                                                        // 没有这一条时，用券合成的失败补偿是「什么都不返」——
+                                                        // money 恒为 0，金币返还那一段永远走不到，
+                                                        // 玩家净亏券 + 粘剂 + 两只精灵。
+                                                        String voucherRefundMsg = null;
+                                                        if (useVoucher && PokeUtils.getInstance().isVoucherRefundEnabled()) {
+                                                            voucherRefundMsg = PokeUtils.getInstance()
+                                                                    .refundVoucher(p, voucherSnapshot);
+                                                        }
+                                                        if (voucherRefundMsg != null) {
+                                                            failMsg.append(", ").append(voucherRefundMsg);
+                                                        }
                                                         failMsg.append("！");
                                                         p.sendMessage(failMsg.toString());
 
@@ -396,6 +422,9 @@ public class PokeCompoundPlayerListener implements Listener {
                                                         }
                                                         if (useVoucher) {
                                                             detail.append(" 使用合成券");
+                                                            if (voucherRefundMsg != null) {
+                                                                detail.append("(已退还)");
+                                                            }
                                                         }
                                                         PokeUtils.getInstance().logCompound(p.getName(), star1, pd.getYS(), false,
                                                                 money, moneyRefund, detail.toString());
@@ -458,8 +487,12 @@ public class PokeCompoundPlayerListener implements Listener {
                             return;
                         }
 
-                        amount += pd.getSlot1() > 0 ? -1 : 0;
-                        amount += pd.getSlot2() > 0 ? -1 : 0;
+                        // 修复：这里原来是 > 0，但队伍槽位下标 0 是合法的第一格 ——
+                        // 「队伍恰好两只、先选第 2 格再选第 1 格」这种顺序下会少减一只，
+                        // 让预览算出「还剩 2 只」而实际只剩 1 只。同一件事文件里有 > -1 / == / > 0
+                        // 三种写法，以 >= 0 为准（唯一正确的那个）。
+                        amount += pd.getSlot1() >= 0 ? -1 : 0;
+                        amount += pd.getSlot2() >= 0 ? -1 : 0;
                         if (amount > 1) {
                             if (slot == 1) {
                                 pd.setSlot1(pokeSlot);
@@ -558,6 +591,8 @@ public class PokeCompoundPlayerListener implements Listener {
         PokeUtils plugin = PokeUtils.getInstance();
         plugin.playerdatas.remove(e.getPlayer().getName());
         plugin.ysdatas.remove(e.getPlayer().getName());
+        // 合成冷却按 UUID 记，退服时顺手摘掉 —— 这张表不应该只增不减。
+        plugin.forgetCompoundCooldown(e.getPlayer().getUniqueId());
         // 内存缓存的退场：把这名玩家的镜像落盘后驱逐。
         // 用 SQLite（同步写穿）时这一步返回即已落盘，与原实现完全等价；
         // 用 MySQL（异步写回）时它是一次排队 —— 服务端被强杀的话，最后这几毫秒的

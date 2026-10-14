@@ -5,6 +5,7 @@ import com.mc9y.pokeutils.data.Async;
 import com.mc9y.pokeutils.data.CachedStorage;
 import com.mc9y.pokeutils.data.CompoundLog;
 import com.mc9y.pokeutils.data.LogIndex;
+import com.mc9y.pokeutils.data.LogWriter;
 import com.mc9y.pokeutils.data.PlayerData;
 import com.mc9y.pokeutils.data.Storage;
 import com.mc9y.pokeutils.data.StorageFactory;
@@ -138,8 +139,16 @@ public class PokeUtils extends JavaPlugin {
     /** 合成流水的内存索引（{@code /pu history|stats|top} 的数据源，见 {@link LogIndex}）。 */
     private LogIndex logIndex;
 
-    /** 上次合成的时间戳（毫秒），按玩家名索引，用于合成冷却。 */
-    private final HashMap<String, Long> lastCompoundAt = new HashMap<String, Long>();
+    /** 合成流水的落盘器（句柄常开，写入跑在 {@link Async} 的写队列上）。 */
+    private LogWriter logWriter;
+
+    /**
+     * 上次合成的时间戳（毫秒），按 <b>UUID</b> 索引，用于合成冷却。
+     *
+     * <p>用 UUID 而不是玩家名：玩家改名会产生一个新的名字键，而旧键永远不会被清掉，
+     * 这张表只增不减（原实现就是这样）。UUID 与账号一一对应，退服时顺手摘掉即可。</p>
+     */
+    private final HashMap<UUID, Long> lastCompoundAt = new HashMap<UUID, Long>();
 
     /** 合成流水日志目录（首次写入时创建）。 */
     private File compoundLogDir;
@@ -156,6 +165,11 @@ public class PokeUtils extends JavaPlugin {
     /** 合成流水的内存索引。 */
     public LogIndex getLogIndex() {
         return this.logIndex;
+    }
+
+    /** 合成流水的落盘器（测试用它验证「句柄复用」与「写后即刷」）。 */
+    public LogWriter getLogWriter() {
+        return this.logWriter;
     }
 
     /**
@@ -383,12 +397,19 @@ public class PokeUtils extends JavaPlugin {
             return true;
         }
         long now = System.currentTimeMillis();
-        Long last = this.lastCompoundAt.get(p.getName());
+        Long last = this.lastCompoundAt.get(p.getUniqueId());
         if (last != null && now - last < cooldown) {
             return false;
         }
-        this.lastCompoundAt.put(p.getName(), now);
+        this.lastCompoundAt.put(p.getUniqueId(), now);
         return true;
+    }
+
+    /** 玩家退服时摘掉他的冷却记录（这张表不再需要按名字无限增长）。 */
+    public void forgetCompoundCooldown(UUID uuid) {
+        if (uuid != null) {
+            this.lastCompoundAt.remove(uuid);
+        }
     }
 
     /** 高星材料二次确认的起始星级；&lt;= 0 表示关闭二次确认。 */
@@ -432,25 +453,34 @@ public class PokeUtils extends JavaPlugin {
         if (this.compoundLogDir == null) {
             this.compoundLogDir = new File(this.getDataFolder(), "logs");
         }
-        if (!this.compoundLogDir.exists() && !this.compoundLogDir.mkdirs()) {
-            return;
-        }
         java.util.Date now = new java.util.Date();
-        String day = new java.text.SimpleDateFormat("yyyy-MM-dd").format(now);
-        String time = new java.text.SimpleDateFormat("HH:mm:ss").format(now);
-        File file = new File(this.compoundLogDir, "compound-" + day + ".log");
-        String line = time + "\t" + playerName + "\t" + star + "\t"
+        final String day = new java.text.SimpleDateFormat("yyyy-MM-dd").format(now);
+        final String time = new java.text.SimpleDateFormat("HH:mm:ss").format(now);
+        final String line = time + "\t" + playerName + "\t" + star + "\t"
                 + (sticker == null ? "-" : sticker) + "\t" + (success ? "成功" : "失败")
                 + "\t" + spent + "\t" + refunded + "\t" + (detail == null ? "-" : detail);
-        try (java.io.Writer writer = new java.io.OutputStreamWriter(
-                new java.io.FileOutputStream(file, true), "UTF-8")) {
-            writer.write(line + System.lineSeparator());
-        } catch (java.io.IOException ex) {
-            this.getLogger().warning("写合成日志失败: " + ex.getMessage());
+
+        // 落盘交给单线程写队列 —— 原来这里是「主线程 new FileOutputStream + 写 + close」，
+        // 每次合成都是一次 open/write/close 的系统调用。这里有个尴尬的不对称：
+        // 我们花大力气用 write-behind 把 MySQL 的网络往返挪出了主线程，却把文件 IO 留在了主线程。
+        // 用同一个写队列（而不是另一个线程池）是为了保证「同一条流水的顺序」，
+        // 也避免了关服时多一处需要单独排空的地方。
+        final File dir = this.compoundLogDir;
+        final LogWriter writer = this.logWriter;
+        if (writer != null) {
+            Async.write(new Runnable() {
+                @Override
+                public void run() {
+                    writer.append(dir, day, line);
+                }
+            });
         }
-        // 同一行再塞进内存索引。用 parse 而不是手工构造 Record：格式只在这一个地方定义，
-        // 写入侧和读取侧因此不可能漂移。文件写失败时索引仍然收下它 ——
-        // 索引是给玩家看「我刚才合成了什么」的，磁盘上的那份才是审计凭证。
+
+        // 同一行再塞进内存索引，而且是**同步**追加 ——「刚合完敲 /pu history 立刻就能看到」
+        // 这个语义不能因为落盘改成异步就变。用 parse 而不是手工构造 Record：
+        // 格式只在这一个地方定义，写入侧和读取侧因此不可能漂移。
+        // 文件写失败时索引仍然收下它 —— 索引是给玩家看「我刚才合成了什么」的，
+        // 磁盘上的那份才是审计凭证。
         if (this.logIndex != null) {
             this.logIndex.append(CompoundLog.parse(day, line));
         }
@@ -653,6 +683,39 @@ public class PokeUtils extends JavaPlugin {
         inventory.setItem(slot, reduced);
     }
 
+    /**
+     * 把一张合成券还给玩家（开关见 {@code Compound.refund.voucher-on-failure}）。
+     *
+     * <p><b>为什么需要它</b>：用券合成时 {@code money} 恒为 0，于是失败补偿里
+     * 「返还 x% 金币」那一条对用券的玩家完全不生效（{@code moneyRefund > 0} 永远不成立）。
+     * 净效果是券 + 粘剂 + 两只精灵全部损失、一无所获 —— 而用金币失败至少还能拿回 20%。
+     * 券是玩家用真金白银换来的（活动 / 礼包 / 补偿），这个不对等没有道理。</p>
+     *
+     * @param voucher 消耗之前留下的券快照（数量会被规整为 1）
+     * @return 给玩家的说明文案；{@code null} 表示没有退还任何东西
+     */
+    public String refundVoucher(Player p, ItemStack voucher) {
+        if (voucher == null) {
+            return null;
+        }
+        try {
+            ItemStack item = voucher.clone();
+            item.setAmount(1);
+            java.util.Map<Integer, ItemStack> leftover = p.getInventory().addItem(item);
+            if (leftover == null || leftover.isEmpty()) {
+                return "合成券已退还";
+            }
+            // 背包塞不下：掉在脚下而不是凭空消失 —— 玩家的资产不该因为背包满就蒸发。
+            for (ItemStack drop : leftover.values()) {
+                p.getWorld().dropItemNaturally(p.getLocation(), drop);
+            }
+            return "背包已满, 合成券已掉落在你脚下";
+        } catch (Throwable t) {
+            this.getLogger().warning("退还合成券失败: " + t);
+            return null;
+        }
+    }
+
     /** 判断某档合成时玩家是否有可用券，供界面提示。 */
     public VoucherType findUsableVoucher(Player p, int star) {
         int slot = this.findVoucherSlot(p, star);
@@ -674,6 +737,16 @@ public class PokeUtils extends JavaPlugin {
     }
 
     // ================================================================ 失败补偿（可配为送粘剂）
+
+    /**
+     * 用合成券合成失败时，是否把券退还给玩家。
+     *
+     * <p>默认开。理由见 {@link #refundVoucher}：用券时金币消耗为 0，于是原有的
+     * 「返还 x% 金币」这条对用券玩家完全不生效，不退还就等于券白烧。</p>
+     */
+    public boolean isVoucherRefundEnabled() {
+        return this.getConfig().getBoolean("Compound.refund.voucher-on-failure", true);
+    }
 
     /** 失败补偿方式：{@code money} / {@code sticker} / {@code both}。 */
     public String getRefundMode() {
@@ -949,8 +1022,11 @@ public class PokeUtils extends JavaPlugin {
             data.mkdir();
         }
 
-        // 后台线程池要先起来 —— 存储层的异步写回就挂在它上面。
+        // 后台线程池要先起来 —— 存储层的异步写回、流水日志落盘、兜底扫描都挂在它上面。
         Async.init(this, StorageFactory.workerThreads(this));
+
+        // 流水日志的落盘器：句柄常开（省掉每行一次 open/close），写入跑在写队列上。
+        this.logWriter = new LogWriter(this.getLogger());
 
         // 存储：插件的持久化全部走这里（粘剂数量 + 连续失败计数）。
         // 具体用 SQLite（默认）还是 MySQL 由 config.yml 的 Storage 段决定；
@@ -1015,6 +1091,31 @@ public class PokeUtils extends JavaPlugin {
         } catch (Throwable t) {
             this.getLogger().warning("产出池自检失败: " + t);
         }
+
+        // 两个周期性维护任务，都跑在异步线程上，绝不占主线程：
+        //   ① CachedStorage.sweep() —— 每秒扫一遍没落盘的脏数据，补上「重试放弃」与
+        //      「玩家挂着不动」这两类永远不会自己再试的情况（详见 CachedStorage 类注释）。
+        //   ② SQLite WAL checkpoint —— 把 -wal 合并回主库并截断，防止长跑服上它一路涨上去。
+        final Storage storageRef = this.storage;
+        if (storageRef instanceof CachedStorage) {
+            Bukkit.getScheduler().runTaskTimerAsynchronously(this, new Runnable() {
+                @Override
+                public void run() {
+                    ((CachedStorage) storageRef).sweep();
+                }
+            }, 20L, 20L);
+        }
+        final int checkpointMinutes = StorageFactory.sqliteCheckpointMinutes(this);
+        if (storageRef != null && checkpointMinutes > 0 && "sqlite".equals(storageRef.kind())) {
+            long period = checkpointMinutes * 60L * 20L;
+            Bukkit.getScheduler().runTaskTimerAsynchronously(this, new Runnable() {
+                @Override
+                public void run() {
+                    storageRef.checkpoint();
+                }
+            }, period, period);
+            this.getLogger().info("SQLite WAL checkpoint 已开启，每 " + checkpointMinutes + " 分钟一次。");
+        }
     }
 
     @Override
@@ -1029,6 +1130,14 @@ public class PokeUtils extends JavaPlugin {
             } catch (Throwable t) {
                 this.getLogger().warning("关服落盘时出错: " + t);
             }
+        }
+        // 日志写任务也排在这同一个写队列上，可能还剩几条没执行完。storage 为 null 时
+        // 上面那一步的排空不会发生，所以这里单独排空一次，之后才关日志句柄 ——
+        // 顺序反了会让最后几条流水打在已关闭的句柄上。
+        Async.drain(2000L);
+        if (this.logWriter != null) {
+            this.logWriter.close();
+            this.logWriter = null;
         }
         // 线程池放在存储之后关：存储的排空要依赖它。
         Async.shutdown(2000L);
@@ -1361,6 +1470,14 @@ public class PokeUtils extends JavaPlugin {
         UUID uuid = online != null ? online.getUniqueId() : this.storage.findUuidByName(playerName);
         String resolvedName = online != null ? online.getName() : playerName;
         if (uuid == null) {
+            // 修复（新增防护）：正版验证模式下 Bukkit.getOfflinePlayer(新名字) 会同步
+            // 请求 Mojang 的 profile 接口，网络不好时能把服务端主线程卡住好几秒。
+            // 而走到这里说明「库里也查不到他」—— 与其卡主线程，不如让管理员知道原因。
+            // 离线模式（online-mode=false）不会有这个请求，保留原有的兜底解析。
+            if (Bukkit.getOnlineMode()) {
+                sender.sendMessage("§b精灵信息 §f// §c找不到该玩家的数据（需要他至少进过一次本服）。");
+                return;
+            }
             OfflinePlayer offline = Bukkit.getOfflinePlayer(playerName);
             if (offline == null || !offline.hasPlayedBefore()) {
                 sender.sendMessage("§b精灵信息 §f// §c找不到该玩家（他可能从未进过本服）！");

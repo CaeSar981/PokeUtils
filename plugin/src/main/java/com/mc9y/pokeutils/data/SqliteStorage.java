@@ -9,6 +9,8 @@ import java.sql.Statement;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import pokeshaded.SQLiteConfig;
 import pokeshaded.SQLiteDataSource;
 
@@ -38,6 +40,11 @@ import pokeshaded.SQLiteDataSource;
  * 原 YAML 版本只在 {@code onDisable} 与 {@code PlayerQuitEvent} 写盘，被 {@code taskkill /F}
  * 结束时会丢掉整个会话的变动。</p>
  *
+ * <p><b>失败语义</b>：读失败<b>留痕并降级</b>（返回默认值而不是抛 —— 一次读失败不该让玩家
+ * 连界面都打不开），写失败<b>抛 {@link StorageException}</b>。改之前这里九处 {@code catch}
+ * 都是 {@code ex.printStackTrace()}：异常只进 stderr，调用方拿到的是「默认值 0 / 空表」，
+ * 分不清「本来就是 0」和「读库炸了」，而写失败被静默吞掉就等于静默丢资产。</p>
+ *
  * <p><b>在存储体系里的位置</b>：本类是 {@link Storage} 的 SQLite 实现，也就是
  * <b>裸后端</b>。插件业务读写的其实是外面那层带缓存的 {@link CachedStorage} ——
  * 本地文件的读写是微秒级，用缓存换来的收益很小，但换来的是「换后端不改业务代码」
@@ -61,11 +68,17 @@ public class SqliteStorage implements Storage {
             + "  PRIMARY KEY (uuid, type))";
 
     private final File dbFile;
+    private final Logger logger;
     private SQLiteDataSource source;
     private Connection connection;
 
     public SqliteStorage(File dbFile) {
+        this(dbFile, null);
+    }
+
+    public SqliteStorage(File dbFile, Logger logger) {
         this.dbFile = dbFile;
+        this.logger = logger;
     }
 
     /** 打开数据库并建表。重复调用是安全的（会先关掉旧连接）。 */
@@ -101,7 +114,9 @@ public class SqliteStorage implements Storage {
             try {
                 this.connection.close();
             } catch (SQLException ex) {
-                ex.printStackTrace();
+                // 关闭时的异常不能往外抛（关服收尾途中抛出去会掩盖真正的收尾动作），
+                // 但仍然要留痕 —— 连接没关干净意味着 WAL 没做最后一次 checkpoint。
+                this.log("关闭连接", ex);
             }
             this.connection = null;
         }
@@ -109,6 +124,26 @@ public class SqliteStorage implements Storage {
 
     public synchronized boolean isOpen() {
         return this.connection != null;
+    }
+
+    /**
+     * 把 WAL 合并回主库并截断附属文件（{@code PRAGMA wal_checkpoint(TRUNCATE)}）。
+     *
+     * <p>TRUNCATE 模式在「有别的连接正在读」时会自动降级为 PASSIVE 而不是报错，
+     * 所以可以放心地周期性调用。由 {@code PokeUtils} 的异步定时器驱动。</p>
+     */
+    @Override
+    public synchronized boolean checkpoint() {
+        if (this.connection == null) {
+            return false;
+        }
+        try (Statement st = this.connection.createStatement()) {
+            st.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+            return true;
+        } catch (SQLException ex) {
+            this.log("WAL checkpoint", ex);
+            return false;
+        }
     }
 
     @Override
@@ -146,7 +181,7 @@ public class SqliteStorage implements Storage {
                 return rs.next();
             }
         } catch (SQLException ex) {
-            ex.printStackTrace();
+            this.log("hasPlayer", ex);
             return false;
         }
     }
@@ -177,7 +212,7 @@ public class SqliteStorage implements Storage {
                 }
             }
         } catch (SQLException ex) {
-            ex.printStackTrace();
+            this.log("findUuidByName", ex);
         }
         return null;
     }
@@ -185,7 +220,7 @@ public class SqliteStorage implements Storage {
     /** 确保玩家行存在并把名字刷新为最新（改名后旧名字不会再被引用）。 */
     public synchronized void touchPlayer(UUID uuid, String name) {
         if (this.connection == null) {
-            return;
+            throw new StorageException("SQLite 连接不可用，无法写入玩家行(" + name + ")");
         }
         String id = uuid.toString();
         try {
@@ -204,7 +239,8 @@ public class SqliteStorage implements Storage {
                 ps.executeUpdate();
             }
         } catch (SQLException ex) {
-            ex.printStackTrace();
+            this.log("touchPlayer", ex);
+            throw new StorageException("SQLite 写入 touchPlayer(" + name + ") 失败: " + ex.getMessage(), ex);
         }
     }
 
@@ -223,7 +259,7 @@ public class SqliteStorage implements Storage {
                 return rs.next() ? rs.getInt(1) : 0;
             }
         } catch (SQLException ex) {
-            ex.printStackTrace();
+            this.log("getSticker", ex);
             return 0;
         }
     }
@@ -243,7 +279,7 @@ public class SqliteStorage implements Storage {
                 }
             }
         } catch (SQLException ex) {
-            ex.printStackTrace();
+            this.log("getStickers", ex);
         }
         return out;
     }
@@ -262,7 +298,7 @@ public class SqliteStorage implements Storage {
     @Override
     public synchronized void setSticker(UUID uuid, String name, String type, int amount) {
         if (this.connection == null) {
-            return;
+            throw new StorageException("SQLite 连接不可用，无法写入粘剂(" + name + "/" + type + ")");
         }
         this.touchPlayer(uuid, name);
         String id = uuid.toString();
@@ -281,7 +317,9 @@ public class SqliteStorage implements Storage {
                 ps.executeUpdate();
             }
         } catch (SQLException ex) {
-            ex.printStackTrace();
+            this.log("setSticker", ex);
+            throw new StorageException("SQLite 写入 setSticker(" + name + "/" + type + ") 失败: "
+                    + ex.getMessage(), ex);
         }
     }
 
@@ -298,14 +336,14 @@ public class SqliteStorage implements Storage {
                 return rs.next() ? rs.getInt(1) : 0;
             }
         } catch (SQLException ex) {
-            ex.printStackTrace();
+            this.log("getFailStreak", ex);
             return 0;
         }
     }
 
     public synchronized void setFailStreak(UUID uuid, String name, int value) {
         if (this.connection == null) {
-            return;
+            throw new StorageException("SQLite 连接不可用，无法写入保底计数(" + name + ")");
         }
         this.touchPlayer(uuid, name);
         try (PreparedStatement ps = this.connection.prepareStatement(
@@ -314,7 +352,27 @@ public class SqliteStorage implements Storage {
             ps.setString(2, uuid.toString());
             ps.executeUpdate();
         } catch (SQLException ex) {
-            ex.printStackTrace();
+            this.log("setFailStreak", ex);
+            throw new StorageException("SQLite 写入 setFailStreak(" + name + ") 失败: "
+                    + ex.getMessage(), ex);
         }
+    }
+
+    // ------------------------------------------------------------------ 日志
+
+    /**
+     * 把 SQL 异常记进插件日志。
+     *
+     * <p>不再走 {@code printStackTrace()} —— 那只会写进 stderr，而运维看的是
+     * {@code logs/latest.log}，等于「出过事但查不到痕迹」。也没有 Logger 时
+     * （只可能是不带 logger 构造的测试）才退回 stderr。</p>
+     */
+    private void log(String what, SQLException ex) {
+        Logger target = this.logger;
+        if (target == null) {
+            ex.printStackTrace();
+            return;
+        }
+        target.log(Level.SEVERE, "SQLite " + what + " 失败: " + ex, ex);
     }
 }

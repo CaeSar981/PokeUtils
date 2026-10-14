@@ -92,4 +92,21 @@ public interface Storage {
     default void shutdown(long timeoutMs) {
         this.close();
     }
+
+    /**
+     * 周期性维护（当前只对 SQLite 有意义：把 WAL 合并回主库并截断）。
+     *
+     * <p><b>为什么要它</b>：SQLite 用 WAL 模式时，已提交的数据先写进 {@code -wal} 附属文件，
+     * 只有 checkpoint 时才合并回 {@code .db}。默认的自动 checkpoint 只在 WAL 涨到约 1000 页
+     * 时触发，而且<b>不会截断文件</b> —— 一个从不重启的服，{@code -wal} 会一路涨上去
+     * （本项目测试服实测 1.8MB，那是被 {@code taskkill /F} 反复硬杀攒出来的）。
+     * 更麻烦的是：WAL 越大，「打开数据库时回放」的耗时越长。</p>
+     *
+     * <p>默认空实现：网络后端没有这个概念。</p>
+     *
+     * @return true = 本次确实做了维护
+     */
+    default boolean checkpoint() {
+        return false;
+    }
 }

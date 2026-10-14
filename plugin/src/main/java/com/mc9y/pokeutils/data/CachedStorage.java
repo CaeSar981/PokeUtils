@@ -38,11 +38,35 @@ import java.util.logging.Logger;
  *       写队列。代价是服务端被强杀时可能丢掉最后几个毫秒的写入 —— 这是选 MySQL
  *       必然要接受的取舍，换来的是主线程不再被网络往返阻塞。</li>
  * </ul>
+ *
+ * <h3>写失败了会怎样</h3>
+ * <p>四层保护，按「发生概率从高到低」排列：</p>
+ * <ol>
+ *   <li><b>退避重试</b>：失败的那一条不会被立刻重排（立刻重排会把几次重试串在同一个
+ *       单线程队列上，每次都可能撞满一次连接超时，最坏十几秒里全服写入一起排队），
+ *       而是记下 {@code retryAt} 交给 {@link #sweep()}。</li>
+ *   <li><b>兜底扫描</b>：{@code sweep()} 每秒跑一次，把到期的脏条目重新排队。
+ *       它同时覆盖「放弃主动重试的条目」和「挂着不动、再也不会触发写入的玩家」——
+ *       没有它，后者的数据只能等关服那次 flush，而强杀关服是抓不到的。</li>
+ *   <li><b>熔断</b>：同一条数据反复失败且全局连续失败数超阈值时，暂停写队列的排队
+ *       （{@code BREAKER_MS}），避免全服写入都堵在连接超时上；窗口过后自动放一次试探。</li>
+ *   <li><b>关服补刀</b>：{@link #shutdown} 先排空队列，再 {@link #flushAll()} 同步补一次，
+ *       最后才关后端。顺序不能反。</li>
+ * </ol>
+ * <p>四条都用的是<b>绝对值写入</b>，所以重放任意多次的结果都一样。</p>
  */
 public class CachedStorage implements Storage {
 
-    /** 单条写回连续失败多少次之后放弃重试（放弃时打 SEVERE，数据仍留在内存里）。 */
+    /** 单条写回连续失败多少次之后放弃「主动重排」，但仍然留在脏集合里等兜底扫描。 */
     private static final int MAX_RETRY = 3;
+    /** 退避起点：失败 1 次后等这么久再试。 */
+    private static final long RETRY_BASE_MS = 250L;
+    /** 退避上限。 */
+    private static final long RETRY_MAX_MS = 10_000L;
+    /** 连续失败达到这个次数就打开熔断器（暂停排队 + 暂停兜底重试）。 */
+    private static final int BREAKER_THRESHOLD = 5;
+    /** 熔断持续时间；到期后放一次写过去试探后端是否恢复。 */
+    private static final long BREAKER_MS = 10_000L;
 
     private final Storage backend;
     private final Logger logger;
@@ -52,6 +76,13 @@ public class CachedStorage implements Storage {
     private final ConcurrentHashMap<UUID, Entry> cache = new ConcurrentHashMap<UUID, Entry>();
     /** 名字（小写）-> UUID。给 {@code /pu g <离线玩家>} 这类反查用，避免每次都查库。 */
     private final ConcurrentHashMap<String, UUID> nameIndex = new ConcurrentHashMap<String, UUID>();
+
+    /** 连续写失败次数（任何一次写成功就清零）。 */
+    private volatile int consecutiveFailures;
+    /** 熔断器截止时间戳；早于它时不再往写队列里排任务。 */
+    private volatile long breakerUntil;
+    /** 关服后置位，兜底扫描不再开工。 */
+    private volatile boolean closed;
 
     public CachedStorage(Storage backend, Logger logger, boolean writeBehind, long flushTimeoutMs) {
         this.backend = backend;
@@ -73,6 +104,8 @@ public class CachedStorage implements Storage {
         boolean evictPending;
         /** 连续写失败次数，成功后清零。 */
         int failures;
+        /** 最早可以再试一次的时间戳（失败后按退避推后；未失败过时为 0）。 */
+        long retryAt;
 
         Entry(UUID uuid, String name) {
             this.uuid = uuid;
@@ -99,6 +132,7 @@ public class CachedStorage implements Storage {
 
     @Override
     public void shutdown(long timeoutMs) {
+        this.closed = true;
         long effective = timeoutMs > 0 ? timeoutMs : this.flushTimeoutMs;
         if (this.writeBehind && !Async.drain(effective)) {
             this.logger.severe("等待异步写回队列排空的 " + effective + "ms 内没有完成，"
@@ -131,6 +165,11 @@ public class CachedStorage implements Storage {
     }
 
     @Override
+    public boolean checkpoint() {
+        return this.backend.checkpoint();
+    }
+
+    @Override
     public Storage backend() {
         return this.backend;
     }
@@ -138,6 +177,22 @@ public class CachedStorage implements Storage {
     /** 写模式：true = 异步写回（MySQL）。测试与 `/pu debug` 会看它。 */
     public boolean isWriteBehind() {
         return this.writeBehind;
+    }
+
+    /** 连续写失败次数（成功一次即清零）。供 `/pu debug` 与测试观察后端健康状况。 */
+    public int consecutiveFailures() {
+        return this.consecutiveFailures;
+    }
+
+    /** 熔断窗口是否生效中。 */
+    public boolean isBroken() {
+        return System.currentTimeMillis() < this.breakerUntil;
+    }
+
+    /** 熔断窗口还剩多少毫秒（未熔断时为 0）。 */
+    public long breakerRemainingMs() {
+        long left = this.breakerUntil - System.currentTimeMillis();
+        return left > 0L ? left : 0L;
     }
 
     /** 当前缓存里的玩家数（只含在线 / 刚退服的）。 */
@@ -374,10 +429,20 @@ public class CachedStorage implements Storage {
 
     // ------------------------------------------------------------------ 落盘
 
-    /** 同步模式直接写穿；异步模式丢给写队列。 */
+    /** 同步模式直接写穿；异步模式丢给写队列（熔断期间只标脏，交给 {@link #sweep()}）。 */
     private void schedule(final Entry entry) {
         if (!this.writeBehind) {
             this.flushEntry(entry);
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now < this.breakerUntil) {
+            // 熔断期间不排队：后端正不可用，排队只会让全服所有人的写入一起堵在
+            // 那个单线程队列上，而每一条都要等满一次连接超时。脏标记留着，
+            // 由 sweep() 在熔断到期后统一补写。
+            synchronized (entry) {
+                entry.retryAt = this.breakerUntil;
+            }
             return;
         }
         Async.write(new Runnable() {
@@ -386,6 +451,41 @@ public class CachedStorage implements Storage {
                 CachedStorage.this.flushEntry(entry);
             }
         });
+    }
+
+    /**
+     * 兜底扫描：把「已经到期但还没落盘」的脏条目重新排进写队列。由定时器每秒调一次。
+     *
+     * <p>它补的是两个洞：</p>
+     * <ol>
+     *   <li><b>放弃主动重排之后的条目</b>：连续失败超过 {@link #MAX_RETRY} 次后我们不再
+     *       自己重排（见 {@link #flushEntry} 的注释），没有它这些数据就只剩关服时
+     *       那一次 {@link #flushAll()} 的机会。</li>
+     *   <li><b>挂着不动的玩家</b>：脏标记留在内存里，而这个玩家再也没有触发过任何写入 ——
+     *       没有兜底扫描的话，他会一直卡到关服，而「强杀关服」是抓不到 flushAll 的。</li>
+     * </ol>
+     */
+    public void sweep() {
+        if (this.closed) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now < this.breakerUntil) {
+            return;
+        }
+        if (this.breakerUntil != 0L) {
+            this.logger.info("存储后端熔断窗口已过，恢复写回。");
+            this.breakerUntil = 0L;
+        }
+        for (Entry entry : this.cache.values()) {
+            boolean due;
+            synchronized (entry) {
+                due = !entry.clean() && now >= entry.retryAt;
+            }
+            if (due) {
+                this.schedule(entry);
+            }
+        }
     }
 
     /**
@@ -440,13 +540,15 @@ public class CachedStorage implements Storage {
             }
             synchronized (entry) {
                 entry.failures = 0;
+                entry.retryAt = 0L;
             }
+            this.noteSuccess();
         } catch (RuntimeException ex) {
-            boolean retry;
             int failures;
             synchronized (entry) {
                 // 把刚摘走的脏标记放回去。放的是「键」而不是当时的「值」——
-                // 下一次重试会重新读一遍当前值，那才是最新值。
+                // 下一次重试会重新读一遍当前值，那才是最新值。写入用的是绝对值，
+                // 所以重放不会多扣一次资产。
                 if (stickerSnapshot != null) {
                     entry.dirtyStickers.addAll(stickerSnapshot.keySet());
                 }
@@ -454,15 +556,47 @@ public class CachedStorage implements Storage {
                 entry.dirtyName |= writeName;
                 entry.failures++;
                 failures = entry.failures;
-                retry = entry.failures <= MAX_RETRY;
+                entry.retryAt = System.currentTimeMillis() + CachedStorage.backoffMs(failures);
             }
-            this.logger.severe("写存储后端失败（第 " + failures + " 次，玩家 " + name + "）: " + ex);
-            if (retry && this.writeBehind) {
-                this.schedule(entry);
+            this.logger.severe("写存储后端失败（第 " + failures + " 次，玩家 " + name
+                    + "），数据保留在内存中，将在 " + CachedStorage.backoffMs(failures)
+                    + "ms 后重试: " + ex);
+            this.noteFailure(failures);
+            // 从这里开始不再自己重排。立刻重排会把几次重试串在同一个单线程写队列上，
+            // 而每一次都可能撞满一次连接超时 —— 最坏十几秒里全服所有人的写入都得排队。
+            // 交给 sweep() 按退避时间兜底，全服写入不受牵连。
+            if (failures == MAX_RETRY) {
+                this.logger.severe("存储后端已连续写入失败 " + MAX_RETRY
+                        + " 次，改为兜底重试；上游不会再等待这次写入的结果。");
             }
             return;
         }
         this.maybeEvict(entry);
+    }
+
+    /** 失败后的退避时长：250ms 起，每次翻倍，封顶 10 秒。 */
+    private static long backoffMs(int failures) {
+        long delay = RETRY_BASE_MS;
+        for (int i = 1; i < failures && delay < RETRY_MAX_MS; i++) {
+            delay <<= 1;
+        }
+        return delay > RETRY_MAX_MS ? RETRY_MAX_MS : delay;
+    }
+
+    /** 记一次写失败；同一条数据反复失败时才升级为「后端不可用」并打开熔断器。 */
+    private void noteFailure(int entryFailures) {
+        int total = ++this.consecutiveFailures;
+        if (entryFailures >= MAX_RETRY && total >= BREAKER_THRESHOLD && this.breakerUntil == 0L) {
+            this.breakerUntil = System.currentTimeMillis() + BREAKER_MS;
+            this.logger.severe("存储后端连续失败 " + total + " 次，暂停 " + (BREAKER_MS / 1000)
+                    + " 秒内的写回排队（避免全服写入都堵在连接超时上）；数据仍在内存里，不会丢。");
+        }
+    }
+
+    /** 记一次写成功：清掉失败计数并复位熔断器。 */
+    private void noteSuccess() {
+        this.consecutiveFailures = 0;
+        this.breakerUntil = 0L;
     }
 
     /** 该驱逐的驱逐：只有「已退服」且「没有未落盘的改动」才允许。 */

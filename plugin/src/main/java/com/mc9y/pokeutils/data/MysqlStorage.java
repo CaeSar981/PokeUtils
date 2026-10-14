@@ -323,7 +323,7 @@ public class MysqlStorage implements Storage {
                 }
             }
         } catch (SQLException ex) {
-            this.logger.warning("MySQL 查询失败(hasPlayer): " + ex.getMessage());
+            this.logger.log(java.util.logging.Level.SEVERE, "MySQL 查询失败(hasPlayer): " + ex, ex);
             return false;
         } finally {
             this.release(connection);
@@ -353,7 +353,7 @@ public class MysqlStorage implements Storage {
                 }
             }
         } catch (SQLException ex) {
-            this.logger.warning("MySQL 查询失败(findUuidByName): " + ex.getMessage());
+            this.logger.log(java.util.logging.Level.SEVERE, "MySQL 查询失败(findUuidByName): " + ex, ex);
         } finally {
             this.release(connection);
         }
@@ -375,7 +375,8 @@ public class MysqlStorage implements Storage {
                 ps.executeUpdate();
             }
         } catch (SQLException ex) {
-            this.logger.warning("MySQL 写入失败(touchPlayer): " + ex.getMessage());
+            this.logger.log(java.util.logging.Level.SEVERE, "MySQL 写入失败(touchPlayer): " + ex, ex);
+            throw new StorageException("MySQL 写入 touchPlayer(" + name + ") 失败: " + ex.getMessage(), ex);
         } finally {
             this.release(connection);
         }
@@ -397,7 +398,7 @@ public class MysqlStorage implements Storage {
                 }
             }
         } catch (SQLException ex) {
-            this.logger.warning("MySQL 查询失败(getSticker): " + ex.getMessage());
+            this.logger.log(java.util.logging.Level.SEVERE, "MySQL 查询失败(getSticker): " + ex, ex);
             return 0;
         } finally {
             this.release(connection);
@@ -420,7 +421,7 @@ public class MysqlStorage implements Storage {
                 }
             }
         } catch (SQLException ex) {
-            this.logger.warning("MySQL 查询失败(getStickers): " + ex.getMessage());
+            this.logger.log(java.util.logging.Level.SEVERE, "MySQL 查询失败(getStickers): " + ex, ex);
         } finally {
             this.release(connection);
         }
@@ -442,7 +443,9 @@ public class MysqlStorage implements Storage {
                 ps.executeUpdate();
             }
         } catch (SQLException ex) {
-            this.logger.warning("MySQL 写入失败(setSticker): " + ex.getMessage());
+            this.logger.log(java.util.logging.Level.SEVERE, "MySQL 写入失败(setSticker): " + ex, ex);
+            throw new StorageException("MySQL 写入 setSticker(" + name + "/" + type + ") 失败: "
+                    + ex.getMessage(), ex);
         } finally {
             this.release(connection);
         }
@@ -463,7 +466,7 @@ public class MysqlStorage implements Storage {
                 }
             }
         } catch (SQLException ex) {
-            this.logger.warning("MySQL 查询失败(getFailStreak): " + ex.getMessage());
+            this.logger.log(java.util.logging.Level.SEVERE, "MySQL 查询失败(getFailStreak): " + ex, ex);
             return 0;
         } finally {
             this.release(connection);
@@ -483,7 +486,9 @@ public class MysqlStorage implements Storage {
                 ps.executeUpdate();
             }
         } catch (SQLException ex) {
-            this.logger.warning("MySQL 写入失败(setFailStreak): " + ex.getMessage());
+            this.logger.log(java.util.logging.Level.SEVERE, "MySQL 写入失败(setFailStreak): " + ex, ex);
+            throw new StorageException("MySQL 写入 setFailStreak(" + name + ") 失败: "
+                    + ex.getMessage(), ex);
         } finally {
             this.release(connection);
         }

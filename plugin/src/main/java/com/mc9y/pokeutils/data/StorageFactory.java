@@ -38,6 +38,7 @@ public final class StorageFactory {
     static final String DEFAULT_WRITE_BEHIND = "auto";
     static final long DEFAULT_FLUSH_TIMEOUT = 5000L;
     static final int DEFAULT_WORKER_THREADS = 2;
+    static final int DEFAULT_SQLITE_CHECKPOINT_MINUTES = 10;
 
     private StorageFactory() {
     }
@@ -94,7 +95,7 @@ public final class StorageFactory {
 
         if (backend == null) {
             SqliteStorage sqlite = new SqliteStorage(StorageFactory.resolveFile(
-                    dataFolder, config.getString("Storage.sqlite.file", DEFAULT_SQLITE_FILE)));
+                    dataFolder, config.getString("Storage.sqlite.file", DEFAULT_SQLITE_FILE)), logger);
             try {
                 sqlite.open();
                 backend = sqlite;
@@ -119,6 +120,18 @@ public final class StorageFactory {
     /** 后台计算线程数（供 {@link Async#init}）。 */
     public static int workerThreads(Plugin plugin) {
         return plugin.getConfig().getInt("Storage.async.worker-threads", DEFAULT_WORKER_THREADS);
+    }
+
+    /**
+     * SQLite 的 WAL checkpoint 间隔（分钟）。0 = 不开启。
+     *
+     * <p>只有 SQLite 后端用得上：WAL 模式下的已提交数据先落在 {@code -wal} 附属文件里，
+     * 默认的自动 checkpoint 不截断文件，一个从不重启的服能把它涨到很大，
+     * 而 WAL 越大「打开数据库时回放」越慢。</p>
+     */
+    public static int sqliteCheckpointMinutes(Plugin plugin) {
+        return plugin.getConfig().getInt("Storage.sqlite.checkpoint-minutes",
+                DEFAULT_SQLITE_CHECKPOINT_MINUTES);
     }
 
     /**

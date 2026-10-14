@@ -110,10 +110,12 @@ PokeUtils/
         │   ├── data/Storage.java             存储契约（写入语义 = 绝对值，便于异步重试）
         │   ├── data/SqliteStorage.java       SQLite 后端（裸后端，autocommit + WAL）
         │   ├── data/MysqlStorage.java        MySQL 后端（轻量连接池 + 反射驱动直连）
-        │   ├── data/CachedStorage.java       门面：内存缓存 + 同步写穿 / 异步写回 + 退服驱逐
+        │   ├── data/CachedStorage.java       门面：内存缓存 + 同步写穿 / 异步写回 + 退避熔断 + 兜底扫描
         │   ├── data/StorageFactory.java      按 Storage.* 配置建后端；连不上就降级 SQLite
+        │   ├── data/StorageException.java    写失败时抛出（读失败降级留痕，写失败不静默）
         │   ├── data/Async.java               两个后台线程池（单线程写队列 + 通用计算）
         │   ├── data/LogIndex.java            合成流水的内存索引（/pu history·stats·top 的数据源）
+        │   ├── data/LogWriter.java           流水日志落盘器（句柄常开、写后即刷，跑在写队列上）
         │   ├── data/LegacyDataMigration.java 旧版 Data/<玩家名>.yml -> 数据库 迁移 + 归档
         │   ├── data/StickerType.java         粘剂定义（读 config.yml 的 Compound.stickers）
         │   ├── data/VoucherType.java         合成券定义（读 config.yml 的 Compound.vouchers）
@@ -714,6 +716,85 @@ MySQL 侧有四个坑，都收敛在 `MysqlStorage` 里：
 - 端到端用例 **N6** 直接用双参版本（`configGetRaw`）读回这几个键，
   逐条断言等于出厂值。两边一旦漂移，N6 立刻红。
 
+### 24. 合成流水日志的落盘挪出主线程（`data/LogWriter.java`）
+
+原来 `logCompound` 每写一行都是「主线程 `new FileOutputStream` + 写 + `close`」。
+这里有个尴尬的不对称：**我们用 `write-behind` 花大力气把 MySQL 的网络往返挪出了主线程，
+却把文件 IO 留在了主线程** —— 每次合成都是一次 open/write/close 的系统调用。
+
+现在文件写走**同一个单线程写队列**（`Async.write`），句柄常开、写后即刷：
+
+- 用同一个队列而不是另开线程池，是为了让「同一条流水的顺序」有保证，
+  也避免关服时多出一处需要单独排空的地方；
+- **写后即刷，不攒批**：流水是事后处理纠纷、复盘经济产出的审计凭证，
+  攒批意味着强杀服务端会丢掉最近的一批记录 —— 这个项目整条链路上都在避免这个语义
+  （原实现栽就栽在「只在 `onDisable` 落盘」上）。拿到的是「省掉 open/close 且不丢数据」，
+  而不是「少几次写但可能丢数据」；
+- **内存索引仍在主线程同步追加**：`/pu history` 立刻可见的语义不能因为落盘改成异步就变。
+  两者共用 `CompoundLog.parse`，格式只有一处定义。
+
+### 25. 存储写失败不再静默（`data/StorageException.java`）
+
+`SqliteStorage` 里原有 **九处 `catch` 全是 `ex.printStackTrace()`**：异常只进 stderr
+（不在 `latest.log` 里），而调用方拿到的是「默认值 0 / 空表」——**分不清「本来就是 0」
+和「读库炸了」**。SQLite 是同步写穿路径，写失败被静默吞掉就等于**静默丢资产**，
+而玩家看到的还是「操作成功」。
+
+现在分成两类处理，这是刻意的区分而不是偷懒：
+
+- **读失败**：留痕（`logger.log(SEVERE, …, ex)`）但**降级返回默认值** ——
+  一次读失败不该让玩家连界面都打不开；
+- **写失败**：留痕后**抛 `StorageException`**。抛出的这点在调用链上正好被
+  `CachedStorage#flushEntry` 接住（保留脏标记 + 退避重试 + 如实记失败次数），
+  而「离线玩家直接打后端」那条路径抛出后会被命令层感知，管理员不会再收到一句假的「操作成功」。
+
+`MysqlStorage` 的七个 `catch` 同步升级（原来只是 `warning`，且连异常对象都没打进日志）。
+
+### 26. 写回失败：退避 + 熔断 + 兜底扫描（`data/CachedStorage.java`）
+
+原来失败后的处理是「在同一个单线程写队列上立刻重排，最多 3 次」。两个问题：
+
+1. **重试会堵住全服**：单线程队列 + 每次重试都可能撞满一次连接超时（默认 5 秒），
+   最坏 15 秒里**全服所有人的写入一起排队**；
+2. **放弃之后没有任何兜底**：3 次用完后脏标记留在内存里，
+   **除非该玩家下次再操作，否则永远不会重试** —— 挂着不动的玩家会一直卡到关服，
+   而「强杀关服」是抓不到 `flushAll` 的。
+
+现在改成四层：
+
+| 层 | 做什么 |
+| --- | --- |
+| 退避 | 失败的那一条不再立刻重排，记下 `retryAt`（250ms 起翻倍，封顶 10 秒）交给兜底扫描 |
+| 兜底扫描 | `sweep()` 每秒跑一次（插件的异步定时器驱动），补上「重试放弃」与「挂机玩家」两类情况 |
+| 熔断 | 同一条反复失败且全局连续失败 ≥ 5 次时暂停排队 10 秒（避免全服堵在连接超时上），窗口过后自动放一次试探 |
+| 关服补刀 | `shutdown` 先排空队列、再 `flushAll` 同步补一次，最后才关后端（顺序不能反） |
+
+四条都建立在**绝对值写入**上，所以重放任意多次的结果都一样。
+`/pu debug` 与 `P` 组用例可以观察 `consecutiveFailures()` / `isBroken()` / `sweep()`。
+
+### 27. P0/P1 的四条小修
+
+- **用合成券失败时退还券**（`Compound.refund.voucher-on-failure`，默认 `true`）。
+  用券时 `money` 恒为 0，于是失败补偿里「返还 x% 金币」那一段**永远走不到** ——
+  净效果是券 + 粘剂 + 两只精灵全损且一无所获，而用金币失败至少能拿回 20%。
+  这个不对等没有道理。背包满时券掉在玩家脚下，不会凭空消失。
+- **队伍槽位下标 0 是合法槽位**。选择材料时算「还剩几只」用的是
+  `pd.getSlot1() > 0`，而槽位下标 0 就是第一格 —— 队伍**恰好两只**时，
+  先选第 2 格再选第 1 格会少减一只，预览算出「还剩 2 只」，直到点确认才被外层拦下
+  （提示还变成「背包最少需要装备三只精灵」）。改成 `>= 0`。
+  同一件事在这个文件里原有 `> -1`（117 行）/ `==`（456 行）/ `> 0`（461 行）三种写法，
+  现在统一到唯一正确的那个。**P 组 P5 专门用「队伍恰好两只」把这个边界钉住**。
+- **SQLite 的 WAL 定期合并**（`Storage.sqlite.checkpoint-minutes`，默认 10，0 = 关）。
+  WAL 模式下的已提交数据先落在 `-wal` 附属文件里，而默认的自动 checkpoint
+  **不截断文件** —— 一个从不重启的服能把它涨到很大（本项目测试服被反复
+  `taskkill /F` 之后实测 1.8MB），而 WAL 越大、下次打开数据库时回放越慢。
+- **合成冷却表从「按玩家名」改成「按 UUID」**（`PokeUtils#lastCompoundAt`），
+  并在退服时摘掉。按名字做键的话，玩家改一次 ID 名就留下一个永远不会被清的旧键 ——
+  这张表只增不减。
+- `handleGiveCommand` 的兜底解析在**正版验证模式**下不再调 `Bukkit.getOfflinePlayer`
+  （那会同步请求 Mojang 的 profile 接口，网络不好时能把主线程卡住几秒）。
+  离线模式行为不变。
+
 ## 配置一览（第三轮新增键）
 
 | 键 | 默认 | 说明 |
@@ -724,6 +805,7 @@ MySQL 侧有四个坑，都收敛在 `MysqlStorage` 里：
 | `Compound.refund.sticker-type` | `PT` | 送哪种粘剂（键名取自 `Compound.stickers`） |
 | `Compound.refund.sticker-amount` | `1` | 送几个 |
 | `Compound.refund.min-star` | `0` | 材料星级 ≥ 本值才送（0 = 不限） |
+| `Compound.refund.voucher-on-failure` | `true` | 用券失败时退还券（背包满则掉在脚下） |
 | `Compound.groups` | `[]` | 权限组折扣与加成，示例见 `config.yml` 注释 |
 | `Compound.vouchers` | `[]` | 合成券定义，示例见 `config.yml` 注释 |
 | `Compound.preview.enabled` | `true` | 是否显示「产出预览」按钮 |
@@ -873,17 +955,19 @@ Blank038API.getPokemonAPI()Lcom/mc9y/pokemonapi/PokemonAPI;   [static]
     **整段缺失时全部回落到与原实现逐位一致的默认值**；
     ⚠️ 但「新增段缺失」时用的是**代码里写的字面量默认值**，不是 jar 内置 `config.yml` ——
     所以两者必须一致，详见修复记录第 19 条
-  - `Storage` —— 存储后端：`type`（`sqlite` / `mysql`）、`sqlite.file`、
+  - `Storage` —— 存储后端：`type`（`sqlite` / `mysql`）、
+    `sqlite.file` 与 `sqlite.checkpoint-minutes`（WAL 定期合并，0 = 关）、
     `mysql.*`（host / port / database / user / password / table-prefix / use-ssl /
     server-timezone / pool-size / connect-timeout-ms / borrow-timeout-ms）、
     `async`（`write-behind` = `auto` / `always` / `never`、`flush-timeout-ms`、
     `worker-threads`）。**改 `type` 需要重启服务端**（`/pu reload` 不会重连数据库），
-    且 SQLite 与 MySQL 里是两份互相独立的数据。详见修复记录第 20~23 条
+    且 SQLite 与 MySQL 里是两份互相独立的数据。详见修复记录第 20~27 条
 - `plugins/PokeUtils-remake/pokeutils.db`：SQLite 数据库（`pu_player` / `pu_sticker` 两张表）。
   用 MySQL 后端时这个文件不参与读写（但会保留在原地，切回 SQLite 时数据还在）
 - `plugins/PokeUtils-remake/Data/<玩家名>.yml`：**仅存在于升级前的旧版本**；
   玩家进服时被导入数据库并归档到 `plugins/PokeUtils-remake/Data-migrated/`（归档而非删除）
 - `plugins/PokeUtils-remake/logs/compound-<日期>.log`：合成流水日志
+  （句柄常开、写后即刷；写入排在插件自己的单线程写队列上，见第 24 条）
 
 > `config.yml` 只在改配置 / `/pu reload` 时读取；而玩家数据**变更即入库**
 > —— 同步写穿模式下写入返回时已经在盘上，异步写回模式下进入单线程队列并在

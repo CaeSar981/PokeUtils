@@ -82,6 +82,11 @@ Compound:
     sticker-amount: 1
     # 只有材料星级 >= 本值时才送粘剂（0 = 不限）。设成 3 就是「只补三星以上的失败」。
     min-star: 0
+    # 用合成券合成失败时，把券退还玩家（默认 true）。
+    # 用券时金币消耗为 0，所以上面那条「返还 x% 金币」对用券的玩家完全不生效 ——
+    # 不退还就等于券 + 粘剂 + 两只精灵全损，而用金币失败至少还能拿回 20%。
+    # 背包满时券会掉在玩家脚下，不会凭空消失。
+    voucher-on-failure: true
 
   # 连续失败保底：同一玩家连续失败达到 threshold 次后，下一次必定成功。
   # 计数按玩家持久化在 SQLite（plugins/PokeUtils/pokeutils.db），成功后清零。
@@ -202,6 +207,11 @@ Storage:
   sqlite:
     # 数据库文件。相对路径基于插件数据目录，也可以写绝对路径。
     file: pokeutils.db
+    # WAL checkpoint 间隔（分钟）。0 = 不开启。
+    # WAL 模式下的已提交数据先落在 pokeutils.db-wal 里，而默认的自动 checkpoint
+    # 不会截断该文件 —— 一个从不重启的服能把它涨到很大（本项目测试服被反复强杀后
+    # 实测 1.8MB），而 WAL 越大，下次打开数据库时回放越慢。定期合并回主库即可。
+    checkpoint-minutes: 10
 
   mysql:
     host: 127.0.0.1
