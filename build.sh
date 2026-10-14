@@ -4,7 +4,7 @@
 #
 #  本机没有安装 maven，因此直接用 javac + jar 出包，等价于 `mvn package` 的结果：
 #    · stub-api 只作编译期 classpath，绝不进最终 jar（等价于 provided 作用域）
-#    · 插件本体 + resources/*.yml 打成 dist/PokeUtils-1.0.0-SNAPSHOT.jar
+#    · 插件本体 + resources/*.yml 打成 dist/PokeUtils-remake-1.0.0-SNAPSHOT.jar
 #
 #  与 maven 的差异（重要）：本项目的存储层依赖 SQLite JDBC 驱动。maven 会由
 #  maven-shade-plugin 自动 shade + relocate，这里改为手工做同样三件事 ——
@@ -36,7 +36,7 @@ STUB_SRC="$HERE/stub-api/src/main/java"
 PLUGIN_SRC="$HERE/plugin/src/main/java"
 RES="$HERE/plugin/src/main/resources"
 OUT="$HERE/build"
-DIST="$HERE/dist/PokeUtils-1.0.0-SNAPSHOT.jar"
+DIST="$HERE/dist/PokeUtils-remake-1.0.0-SNAPSHOT.jar"
 LIB_DIR="$HERE/libs"
 SQLITE_JAR="${SQLITE_JAR:-$(ls "$LIB_DIR"/sqlite-jdbc-*.jar 2>/dev/null | head -1)}"
 
@@ -154,7 +154,7 @@ echo "    重定位残留检查: $STALE 个 org/sqlite 条目（应为 0）"
 [ "$STALE" = "0" ] || { echo "!! 重定位不彻底，运行期会被父加载器的旧版驱动顶掉"; exit 1; }
 
 if [ "$1" = "deploy" ]; then
-    TARGET="$HERE/../TestServer/plugins/PokeUtils-1.0.0-SNAPSHOT.jar"
+    TARGET="$HERE/../TestServer/plugins/PokeUtils-remake-1.0.0-SNAPSHOT.jar"
     cp "$DIST" "$TARGET"
     echo "==> 已部署到 $TARGET"
 fi

@@ -3,6 +3,10 @@
 Pixelmon（1.12.2）服务器的**精灵合成**插件。由原始 jar `PokeUtils-1.0.0-SNAPSHOT.jar` 反编译复原而来，
 源码逻辑与行为与原插件一致。
 
+> **插件名（`plugin.yml` 的 `name`）为 `PokeUtils-remake`**，用于与原版 jar 区分。
+> 主类、命令（`/pu`）、包名、权限节点与数据表结构**均未改动**；
+> 数据目录相应变为 `plugins/PokeUtils-remake/`（从旧目录迁移即可无缝续用旧数据）。
+
 > **本版本已在原版基础上移除 PokeQuest 依赖**，同时去掉了合成时向 PokeQuest 上报任务进度的调用。
 
 ## 功能
@@ -441,7 +445,7 @@ Compound:
 管理员手上没有任何可查的记录。
 
 **修法**：`Compound.log.enabled`（默认 `true`）时，每次合成落一行
-制表符分列的日志到 `plugins/PokeUtils/logs/compound-<日期>.log`：
+制表符分列的日志到 `plugins/PokeUtils-remake/logs/compound-<日期>.log`：
 玩家、材料星级、结果、消耗、粘剂、剩余、保底计数、耗时毫秒。
 L12 断言了字段数与星级取值。
 
@@ -467,7 +471,7 @@ L12 断言了字段数与星级取值。
 
 ### 17. 数据层：每个玩家一个 YAML → SQLite（主键改用 UUID）
 
-原实现是 `plugins/PokeUtils/Data/<玩家名>.yml`，两个问题：
+原实现是 `plugins/PokeUtils-remake/Data/<玩家名>.yml`，两个问题：
 
 - **名字当键**：玩家改一次 ID 名，粘剂和保底计数就全部归零；
 - **只在 `onDisable` / `PlayerQuitEvent` 写盘**：而本测试服的关服方式是 `taskkill /F`
@@ -665,7 +669,7 @@ Pixelmon 1.12.2 里 `Pokemon`、`PlayerPartyStorage`、`PokemonFactory` 都是 *
      `org_sqlite` 三种写法都改到 `pokeshaded`（恰好都是 10 字符，可以免改
      `CONSTANT_Utf8` 的 length 字段直接替换字节），JNI 符号一并处理；
   3. 重新打包，并重命名包目录、清理空父目录。
-- 插件本体与 `resources/*.yml`、shade 后的驱动打成 `dist/PokeUtils-1.0.0-SNAPSHOT.jar`；
+- 插件本体与 `resources/*.yml`、shade 后的驱动打成 `dist/PokeUtils-remake-1.0.0-SNAPSHOT.jar`；
 - 结束前三项自检：第三方桩混进产物数应为 **0**、驱动 class/native 数应 **> 0**、
   重定位残留的 `org/sqlite` 条目数应为 **0**。
 
@@ -675,11 +679,11 @@ Pixelmon 1.12.2 里 `Pokemon`、`PlayerPartyStorage`、`PokemonFactory` 都是 *
 mvn clean package
 ```
 
-产物：`plugin/target/PokeUtils-1.0.0-SNAPSHOT.jar`（另存一份到 `dist/`），
+产物：`plugin/target/PokeUtils-remake-1.0.0-SNAPSHOT.jar`（另存一份到 `dist/`），
 直接丢进服务端 `plugins/` 目录即可。
 
 > 改完记得在 `../TestServer/` 里跑一次端到端回归（见该目录的 `README-测试指南.md` 第八节），
-> 或者至少执行 `python ../TestServer/tools/verify-compat.py dist/PokeUtils-1.0.0-SNAPSHOT.jar ...`
+> 或者至少执行 `python ../TestServer/tools/verify-compat.py dist/PokeUtils-remake-1.0.0-SNAPSHOT.jar ...`
 > 确认外部引用仍然成立。
 
 ### 与真实 PokeStar 的接口核对
@@ -745,7 +749,7 @@ Blank038API.getPokemonAPI()Lcom/mc9y/pokemonapi/PokemonAPI;   [static]
 
 ## 数据文件
 
-- `plugins/PokeUtils/config.yml`：
+- `plugins/PokeUtils-remake/config.yml`：
   - `Info` —— GUI 内「使用方法」书本的文案（名称 + lore；lore 里写 `{price}` 占位符的
     那一行会在打开界面时展开成各档价格表）
   - `VIP.keep-one` —— 七星合成失败时「保留一只精灵」的权限节点
@@ -760,10 +764,10 @@ Blank038API.getPokemonAPI()Lcom/mc9y/pokemonapi/PokemonAPI;   [static]
     **整段缺失时全部回落到与原实现逐位一致的默认值**；
     ⚠️ 但「新增段缺失」时用的是**代码里写的字面量默认值**，不是 jar 内置 `config.yml` ——
     所以两者必须一致，详见修复记录第 19 条
-- `plugins/PokeUtils/pokeutils.db`：SQLite 数据库（`pu_player` / `pu_sticker` 两张表）
-- `plugins/PokeUtils/Data/<玩家名>.yml`：**仅存在于升级前的旧版本**；
-  玩家进服时被导入数据库并归档到 `plugins/PokeUtils/Data-migrated/`（归档而非删除）
-- `plugins/PokeUtils/logs/compound-<日期>.log`：合成流水日志
+- `plugins/PokeUtils-remake/pokeutils.db`：SQLite 数据库（`pu_player` / `pu_sticker` 两张表）
+- `plugins/PokeUtils-remake/Data/<玩家名>.yml`：**仅存在于升级前的旧版本**；
+  玩家进服时被导入数据库并归档到 `plugins/PokeUtils-remake/Data-migrated/`（归档而非删除）
+- `plugins/PokeUtils-remake/logs/compound-<日期>.log`：合成流水日志
 
 > `config.yml` 只在改配置 / `/pu reload` 时读取；而玩家数据**每次变更立即入库**
 > （SQLite autocommit，见修复记录第 9、17 条）。

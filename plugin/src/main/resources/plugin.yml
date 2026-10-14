@@ -1,4 +1,4 @@
-name: PokeUtils
+name: PokeUtils-remake
 main: com.mc9y.pokeutils.PokeUtils
 depend:
   - PokeStar
