@@ -190,3 +190,42 @@ Compound:
   # 填上节点名（例如 pokeutils.use）后，玩家需要拥有该节点才能执行 /pu compound。
   # 注意：权限节点本身已写在 plugin.yml 里，可被权限插件直接识别。
   use-permission: ""
+
+# 存储后端（本次新增）。玩家资产的持久化全在这里。
+#   sqlite  本地文件，零依赖。单机/单服直接用这个（默认）
+#   mysql   多个服务端共用一份数据时用这个
+# 切换 type 需要重启服务器（/pu reload 不会重连数据库）。
+# ⚠️ SQLite 与 MySQL 里是两份互相独立的数据，改 type 不会自动搬家。
+Storage:
+  type: sqlite
+
+  sqlite:
+    # 数据库文件。相对路径基于插件数据目录，也可以写绝对路径。
+    file: pokeutils.db
+
+  mysql:
+    host: 127.0.0.1
+    port: 3306
+    database: pokeutils
+    user: root
+    password: ""
+    # 表名前缀，用来和同一个库里的其它插件的表隔开
+    table-prefix: "pu_"
+    use-ssl: false
+    # MySQL 8 的 cj 驱动通常需要它（例如 Asia/Shanghai）；5.1 驱动留空即可
+    server-timezone: ""
+    # 连接池上限。写入走单线程 + 后台计算线程，4 足够
+    pool-size: 4
+    connect-timeout-ms: 5000
+    borrow-timeout-ms: 3000
+
+  async:
+    # 写回模式（本次新增）：
+    #   auto    本地后端同步写穿、网络后端异步写回（默认）
+    #   always  一律异步写回（主线程不等落库；强杀服务端会丢掉最后几毫秒的写入）
+    #   never   一律同步写穿（写入返回即已落盘，最安全；MySQL 上每次写要等一次网络往返）
+    write-behind: auto
+    # 关服时最多等多久让写回队列排空（毫秒）
+    flush-timeout-ms: 5000
+    # 后台计算线程数（当前用于重建合成流水索引、重载配置）
+    worker-threads: 2

@@ -7,8 +7,9 @@ import java.util.UUID;
 /**
  * 单个玩家持久化数据的门面（粘剂数量 + 合成连续失败次数）。
  *
- * <p><b>存储后端已从 YAML 换成 SQLite</b>（见 {@link SqliteStorage}）。本类因此退化成
- * 一层薄门面：自己不再持有任何状态，每次读写都直接打到数据库。这样做的原因有两条：</p>
+ * <p><b>存储后端已从 YAML 换成数据库</b>（见 {@link Storage}，可切 SQLite / MySQL）。
+ * 本类因此退化成一层薄门面：自己不再持有任何状态，每次读写都直接打到存储层。
+ * 这样做的原因有两条：</p>
  * <ol>
  *   <li>数据不可能出现「内存与磁盘不一致」—— 原 YAML 版在 playerdatas 之外还各自缓存了
  *       一份 {@code FileConfiguration}，强杀服务端时缓存里的变动就丢了；</li>
@@ -45,19 +46,19 @@ public class YSData {
      * 「粘剂数据尚未加载」的提示分支，让玩家看到一句人话比看到一条栈更有用。</p>
      */
     public int getAmount(String key) {
-        SqliteStorage storage = PokeUtils.getInstance().getStorage();
+        Storage storage = PokeUtils.getInstance().getStorage();
         return storage == null ? 0 : storage.getSticker(this.uuid, key);
     }
 
     /** 该玩家全部粘剂的数量快照，供界面一次性取用。 */
     public Map<String, Integer> allAmounts() {
-        SqliteStorage storage = PokeUtils.getInstance().getStorage();
+        Storage storage = PokeUtils.getInstance().getStorage();
         return storage == null ? new java.util.HashMap<String, Integer>() : storage.getStickers(this.uuid);
     }
 
     /** 增加粘剂（数量为负时即减少，结果不会被压到 0 以下）。 */
     public void deposit(String key, int aa) {
-        SqliteStorage storage = PokeUtils.getInstance().getStorage();
+        Storage storage = PokeUtils.getInstance().getStorage();
         if (storage != null) {
             storage.addSticker(this.uuid, this.name, key, aa);
         }
@@ -65,7 +66,7 @@ public class YSData {
 
     /** 扣除粘剂。SQLite 侧统一做了 {@code MAX(0, ...)} 夹取，不会扣成负数。 */
     public void withdraw(String key, int aa) {
-        SqliteStorage storage = PokeUtils.getInstance().getStorage();
+        Storage storage = PokeUtils.getInstance().getStorage();
         if (storage != null) {
             storage.addSticker(this.uuid, this.name, key, -aa);
         }
@@ -73,13 +74,13 @@ public class YSData {
 
     /** 连续合成失败次数（用于「连续失败保底」）。 */
     public int getFailStreak() {
-        SqliteStorage storage = PokeUtils.getInstance().getStorage();
+        Storage storage = PokeUtils.getInstance().getStorage();
         return storage == null ? 0 : storage.getFailStreak(this.uuid);
     }
 
     /** 写入连续失败次数。SQLite 模式下写入即提交，无需再调 save()。 */
     public void setFailStreak(int value) {
-        SqliteStorage storage = PokeUtils.getInstance().getStorage();
+        Storage storage = PokeUtils.getInstance().getStorage();
         if (storage != null) {
             storage.setFailStreak(this.uuid, this.name, value);
         }

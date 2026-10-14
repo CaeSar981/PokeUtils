@@ -1,9 +1,13 @@
 package com.mc9y.pokeutils;
 
 import com.mc9y.pokestar.PokeStarAPI;
+import com.mc9y.pokeutils.data.Async;
+import com.mc9y.pokeutils.data.CachedStorage;
 import com.mc9y.pokeutils.data.CompoundLog;
+import com.mc9y.pokeutils.data.LogIndex;
 import com.mc9y.pokeutils.data.PlayerData;
-import com.mc9y.pokeutils.data.SqliteStorage;
+import com.mc9y.pokeutils.data.Storage;
+import com.mc9y.pokeutils.data.StorageFactory;
 import com.mc9y.pokeutils.data.StickerType;
 import com.mc9y.pokeutils.data.VoucherType;
 import com.mc9y.pokeutils.data.YSData;
@@ -37,7 +41,7 @@ import org.bukkit.plugin.java.JavaPlugin;
  * PokeUtils 主类
  *
  * <p>提供精灵合成（2 只同星级精灵 + 粘剂 + 金币 -> 1 只高星级精灵）功能的 GUI 插件。
- * 依赖 PokeStar / Vault / PokeStatsAPI / PokemonAPI / MSGToggle。</p>
+ * 依赖 PokeStar / Vault / PokemonAPI / MSGToggle。</p>
  */
 public class PokeUtils extends JavaPlugin {
 
@@ -119,13 +123,20 @@ public class PokeUtils extends JavaPlugin {
     public Economy economy;
 
     /**
-     * SQLite 存储（持久化的唯一出口）。
+     * 存储门面（持久化的唯一出口）。
+     *
+     * <p>它背后可能是 SQLite（默认，零依赖）或 MySQL（多服共用一份数据时用），
+     * 由 {@code config.yml} 的 {@code Storage.type} 决定；业务代码只认
+     * {@link Storage} 这个接口，换后端不需要改一行业务逻辑。</p>
      *
      * <p>打开失败时为 {@code null}，此时插件仍会加载，但所有读写退化成「读到 0 / 写入丢弃」，
      * 玩家会看到既有的「粘剂数据尚未加载」提示。这是有意为之：存储层故障不该让整台服务器
      * 的合成玩法连带崩掉，但控制台一定会留下一条 {@code SEVERE}。</p>
      */
-    private SqliteStorage storage;
+    private Storage storage;
+
+    /** 合成流水的内存索引（{@code /pu history|stats|top} 的数据源，见 {@link LogIndex}）。 */
+    private LogIndex logIndex;
 
     /** 上次合成的时间戳（毫秒），按玩家名索引，用于合成冷却。 */
     private final HashMap<String, Long> lastCompoundAt = new HashMap<String, Long>();
@@ -133,8 +144,27 @@ public class PokeUtils extends JavaPlugin {
     /** 合成流水日志目录（首次写入时创建）。 */
     private File compoundLogDir;
 
-    public SqliteStorage getStorage() {
+    public Storage getStorage() {
         return this.storage;
+    }
+
+    /** 未经缓存包装的裸存储后端（只有测试会用它来验证「数据真的落库了」）。 */
+    public Storage getBackend() {
+        return this.storage == null ? null : this.storage.backend();
+    }
+
+    /** 合成流水的内存索引。 */
+    public LogIndex getLogIndex() {
+        return this.logIndex;
+    }
+
+    /**
+     * 等异步写回队列排空。
+     *
+     * @return true = 已排空；false = 超时
+     */
+    public boolean awaitAsync(long timeoutMs) {
+        return Async.drain(timeoutMs);
     }
 
     public static PokeUtils getInstance() {
@@ -417,6 +447,12 @@ public class PokeUtils extends JavaPlugin {
             writer.write(line + System.lineSeparator());
         } catch (java.io.IOException ex) {
             this.getLogger().warning("写合成日志失败: " + ex.getMessage());
+        }
+        // 同一行再塞进内存索引。用 parse 而不是手工构造 Record：格式只在这一个地方定义，
+        // 写入侧和读取侧因此不可能漂移。文件写失败时索引仍然收下它 ——
+        // 索引是给玩家看「我刚才合成了什么」的，磁盘上的那份才是审计凭证。
+        if (this.logIndex != null) {
+            this.logIndex.append(CompoundLog.parse(day, line));
         }
     }
 
@@ -858,9 +894,17 @@ public class PokeUtils extends JavaPlugin {
         return this.getConfig().getInt("Compound.log.keep-days", 30);
     }
 
-    /** 读全部合成流水（受 keep-days 与 max-scan-lines 限制）。 */
+    /**
+     * 读全部合成流水（受 keep-days 与 max-scan-lines 限制）。
+     *
+     * <p>数据来自启动时建好的内存索引，<b>不再读盘</b>。索引里的内容与磁盘上的日志文件
+     * 在语义上等价（同样的保留天数、同样的扫描上限），但一次查询从「几十万行的文件解析」
+     * 变成「遍历一个内存数组」。</p>
+     */
     public List<CompoundLog.Record> readLogs() {
-        return CompoundLog.read(this.getDataFolder(), this.getLogKeepDays(), this.getLogMaxScanLines());
+        return this.logIndex == null
+                ? CompoundLog.read(this.getDataFolder(), this.getLogKeepDays(), this.getLogMaxScanLines())
+                : this.logIndex.all();
     }
 
     /** 清理超期日志，返回删除数量（启动时与 `/pu reload` 时调用）。 */
@@ -905,21 +949,24 @@ public class PokeUtils extends JavaPlugin {
             data.mkdir();
         }
 
-        // SQLite 存储：插件的持久化全部走这里（粘剂数量 + 连续失败计数）。
-        // 数据库文件放在插件目录下的 pokeutils.db，与旧版 Data/ 目录并存，迁移原地进行。
-        try {
-            SqliteStorage opened = new SqliteStorage(new File(this.getDataFolder(), "pokeutils.db"));
-            opened.open();
-            this.storage = opened;
-            this.getLogger().info("SQLite 存储已就绪 -> " + opened.getDbFile().getPath());
-        } catch (Exception ex) {
-            this.storage = null;
-            this.getLogger().severe("SQLite 存储打开失败，本插件将无法保存任何数据！");
-            ex.printStackTrace();
+        // 后台线程池要先起来 —— 存储层的异步写回就挂在它上面。
+        Async.init(this, StorageFactory.workerThreads(this));
+
+        // 存储：插件的持久化全部走这里（粘剂数量 + 连续失败计数）。
+        // 具体用 SQLite（默认）还是 MySQL 由 config.yml 的 Storage 段决定；
+        // MySQL 连不上会自动回退 SQLite 并打 SEVERE，绝不因为连不上库就让插件启用失败。
+        StorageFactory.Opened opened = StorageFactory.open(this, this.getDataFolder(), this.getLogger());
+        this.storage = opened.storage;
+        if (this.storage == null) {
+            this.getLogger().severe("存储后端不可用，本插件将无法保存任何数据（合成仍可进行，但粘剂与保底计数不会持久化）。");
         }
 
         for (Player player : Bukkit.getOnlinePlayers()) {
             this.ysdatas.put(player.getName(), new YSData(player.getUniqueId(), player.getName()));
+            if (this.storage instanceof CachedStorage) {
+                // /reload 的情况下可能有玩家在线，先把他们的数据读进缓存。
+                ((CachedStorage) this.storage).loadPlayer(player.getUniqueId(), player.getName());
+            }
         }
 
         // 修复（新增防护）：原实现直接 getRegistration(Economy.class).getProvider()，
@@ -934,8 +981,8 @@ public class PokeUtils extends JavaPlugin {
 
         Bukkit.getPluginManager().registerEvents(new PokeCompoundPlayerListener(), this);
 
-        // 启动自检两件事：清掉超期日志、检查各星级产出池是否为空。
-        // 两者都只写日志、绝不抛异常 —— 自检本身不该成为「插件启用失败」的原因。
+        // 启动自检三件事：清掉超期日志、建流水内存索引、检查各星级产出池是否为空。
+        // 三者都只写日志、绝不抛异常 —— 自检本身不该成为「插件启用失败」的原因。
         try {
             int removed = this.cleanupLogs();
             if (removed > 0) {
@@ -944,6 +991,24 @@ public class PokeUtils extends JavaPlugin {
             }
         } catch (Throwable t) {
             this.getLogger().warning("清理旧合成日志失败: " + t);
+        }
+        // 索引要在清理之后建，免得把马上要被删的文件读一遍。
+        int indexed = -1;
+        try {
+            this.logIndex = new LogIndex(this.getDataFolder(),
+                    this.getLogKeepDays(), this.getLogMaxScanLines());
+            indexed = this.logIndex.rebuild();
+        } catch (Throwable t) {
+            this.getLogger().warning("建立合成流水索引失败: " + t);
+        }
+        if (this.logIndex == null) {
+            // 兜底：给个空索引，保证 logCompound / 命令永远不会踩空指针。
+            this.logIndex = new LogIndex(this.getDataFolder(),
+                    this.getLogKeepDays(), this.getLogMaxScanLines());
+        }
+        if (indexed > 0) {
+            this.getLogger().info("合成流水索引已建立：" + indexed + " 条记录（上限 "
+                    + this.getLogMaxScanLines() + " 条）。");
         }
         try {
             this.checkStarPools();
@@ -954,13 +1019,22 @@ public class PokeUtils extends JavaPlugin {
 
     @Override
     public void onDisable() {
-        // 换成 SQLite 之后，这里不再需要「遍历保存」——每次写入都已在事务里提交。
-        // 只需要把连接关掉（关闭时 SQLite 会自动做一次 WAL checkpoint，把 -wal 合并回主库）。
+        // 关服收尾的顺序不能反：先把异步写回队列排空、再补一次同步 flush，最后才关连接。
+        // 反过来（先关连接）会让排在队列里的写入全部打在已关闭的连接上。
+        // 用 MySQL + 异步写回时这一步尤其重要 —— 不开 onDisable 的强杀（taskkill /F）
+        // 一定会丢掉最后那几毫秒的写入，这是选异步必然的代价。
         if (this.storage != null) {
-            this.storage.close();
+            try {
+                this.storage.shutdown(this.getConfig().getLong("Storage.async.flush-timeout-ms", 5000L));
+            } catch (Throwable t) {
+                this.getLogger().warning("关服落盘时出错: " + t);
+            }
         }
+        // 线程池放在存储之后关：存储的排空要依赖它。
+        Async.shutdown(2000L);
         this.ysdatas.clear();
         this.playerdatas.clear();
+        this.lastCompoundAt.clear();
     }
 
     @Override
@@ -1010,6 +1084,19 @@ public class PokeUtils extends JavaPlugin {
             this.invalidateVouchers();
             // 产出池可能被 PokeStar 的 stars.yml 改动影响，重载时再自检一次。
             this.checkStarPools();
+            // 日志索引的上限（history.max-scan-lines）可能被改了，磁盘上的日志也可能
+            // 被运维清理过 —— 重建一次索引。放后台线程：全量读盘在几十万行时上百毫秒，
+            // 不该卡在管理员敲下 /pu reload 的这一帧上。
+            final LogIndex index = this.logIndex;
+            if (index != null) {
+                index.configure(this.getLogKeepDays(), this.getLogMaxScanLines());
+                Async.compute(new Runnable() {
+                    @Override
+                    public void run() {
+                        index.rebuild();
+                    }
+                });
+            }
             sender.sendMessage("§b精灵信息 §f// §a插件配置重载完成！");
         } else if (args[0].equalsIgnoreCase("history")) {
             this.handleHistoryCommand(sender, args);
@@ -1067,16 +1154,15 @@ public class PokeUtils extends JavaPlugin {
         int size = args.length >= 3 ? parseInt(args[2], this.getHistorySize()) : this.getHistorySize();
         size = size < 1 ? 1 : (size > 50 ? 50 : size);
 
-        List<CompoundLog.Record> mine = CompoundLog.forPlayer(this.readLogs(), target);
+        // 索引直接给出「最近 N 条、最新在前」，不用先把该玩家的全部记录拉出来再截。
+        List<CompoundLog.Record> mine = this.logIndex.recentFor(target, size);
         sender.sendMessage("§a============ §e" + target + " 的最近合成记录 §a============");
         if (mine.isEmpty()) {
             sender.sendMessage("§7 没有查到这个玩家的合成记录。");
             sender.sendMessage("§a==============================================");
             return;
         }
-        int from = Math.max(mine.size() - size, 0);
-        for (int i = mine.size() - 1; i >= from; i--) {
-            CompoundLog.Record record = mine.get(i);
+        for (CompoundLog.Record record : mine) {
             StringBuilder line = new StringBuilder();
             line.append("§7 ").append(record.date.length() >= 5 ? record.date.substring(5) : record.date)
                     .append(" ").append(record.time).append(" §f").append(starName(record.star))
@@ -1090,7 +1176,7 @@ public class PokeUtils extends JavaPlugin {
             }
             sender.sendMessage(line.toString());
         }
-        CompoundLog.Stats stats = CompoundLog.summarize(mine);
+        CompoundLog.Stats stats = this.logIndex.stats(target);
         sender.sendMessage("§7 共 §f" + stats.total + " §7次 · 成功 §a" + stats.success
                 + " §7· 失败 §c" + stats.fail + " §7· 成功率 §f" + stats.rate() + "%");
         sender.sendMessage("§a==============================================");
@@ -1114,9 +1200,7 @@ public class PokeUtils extends JavaPlugin {
             }
             target = ((Player) sender).getName();
         }
-        List<CompoundLog.Record> records = this.readLogs();
-        CompoundLog.Stats stats = CompoundLog.summarize(
-                all ? records : CompoundLog.forPlayer(records, target));
+        CompoundLog.Stats stats = this.logIndex.stats(all ? null : target);
         sender.sendMessage("§a============ §e" + (all ? "全服" : target) + " 合成统计 §a============");
         sender.sendMessage("§7 总次数 §f" + stats.total + " §7· 成功 §a" + stats.success
                 + " §7· 失败 §c" + stats.fail + " §7· 成功率 §f" + stats.rate() + "%");
@@ -1136,7 +1220,7 @@ public class PokeUtils extends JavaPlugin {
     /** {@code /pu top [count|star]}：合成排行榜。 */
     private void handleTopCommand(CommandSender sender, String[] args) {
         boolean byStar = args.length >= 2 && "star".equalsIgnoreCase(args[1]);
-        List<CompoundLog.Count> top = CompoundLog.top(this.readLogs(), byStar);
+        List<CompoundLog.Count> top = this.logIndex.top(byStar);
         sender.sendMessage("§a============ §e合成排行榜（" + (byStar ? "最高星级" : "成功次数") + "）§a============");
         if (top.isEmpty()) {
             sender.sendMessage("§7 还没有任何合成记录。");

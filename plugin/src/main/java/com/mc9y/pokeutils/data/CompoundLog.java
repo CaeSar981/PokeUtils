@@ -92,6 +92,11 @@ public final class CompoundLog {
         }
     }
 
+    /** 造一个空的计数条目（供 {@link LogIndex} 在内存里聚合）。 */
+    public static Count newCount(String player) {
+        return new Count(player);
+    }
+
     private CompoundLog() {
     }
 
@@ -151,8 +156,14 @@ public final class CompoundLog {
         return out;
     }
 
-    /** 解析一行；格式不对（手工编辑过 / 半行）时返回 null 而不是抛异常。 */
-    static Record parse(String date, String line) {
+    /**
+     * 解析一行；格式不对（手工编辑过 / 半行）时返回 null 而不是抛异常。
+     *
+     * <p>是 {@code public} 的：写入侧（{@code PokeUtils#logCompound}）拼完那一行之后
+     * 也要用它把同一行解析成 {@link Record} 塞进内存索引。宁可多走一次解析，
+     * 也不要在写入侧把格式再手写一遍 —— 两处格式一旦漂移，索引里的数据和文件里的就对不上了。</p>
+     */
+    public static Record parse(String date, String line) {
         if (line == null) {
             return null;
         }

@@ -6,8 +6,10 @@ import com.mc9y.pokemonapi.api.pokemon.PokemonUtil;
 import com.mc9y.pokemonapi.api.storage.PlayerStorageUtil;
 import com.mc9y.pokestar.PokeStarAPI;
 import com.mc9y.pokeutils.PokeUtils;
+import com.mc9y.pokeutils.data.CachedStorage;
 import com.mc9y.pokeutils.data.LegacyDataMigration;
 import com.mc9y.pokeutils.data.PlayerData;
+import com.mc9y.pokeutils.data.Storage;
 import com.mc9y.pokeutils.data.StickerType;
 import com.mc9y.pokeutils.data.YSData;
 import com.pixelmonmod.pixelmon.Pixelmon;
@@ -553,9 +555,18 @@ public class PokeCompoundPlayerListener implements Listener {
 
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent e) {
-        PokeUtils.getInstance().playerdatas.remove(e.getPlayer().getName());
-        // 换成 SQLite 之后不存在「退服才落盘」这回事，写入当场就提交了，这里只是摘掉会话缓存。
-        PokeUtils.getInstance().ysdatas.remove(e.getPlayer().getName());
+        PokeUtils plugin = PokeUtils.getInstance();
+        plugin.playerdatas.remove(e.getPlayer().getName());
+        plugin.ysdatas.remove(e.getPlayer().getName());
+        // 内存缓存的退场：把这名玩家的镜像落盘后驱逐。
+        // 用 SQLite（同步写穿）时这一步返回即已落盘，与原实现完全等价；
+        // 用 MySQL（异步写回）时它是一次排队 —— 服务端被强杀的话，最后这几毫秒的
+        // 变动会丢，这是选异步拿性能时明码标价的代价，写回模式可以在
+        // config.yml 的 Storage.async.write-behind 里改成 never 关掉。
+        Storage storage = plugin.getStorage();
+        if (storage instanceof CachedStorage) {
+            ((CachedStorage) storage).unloadPlayer(e.getPlayer().getUniqueId());
+        }
     }
 
     /**
@@ -570,11 +581,17 @@ public class PokeCompoundPlayerListener implements Listener {
         Player p = e.getPlayer();
         PokeUtils plugin = PokeUtils.getInstance();
 
+        // 顺序很重要：先把旧版数据迁进存储，再把存储读进内存缓存。
+        // 反过来的话，缓存里存的是迁移前的值，刚导入的旧数据要到下次进服才看得到。
         boolean migrated = LegacyDataMigration.migrateIfNeeded(
                 plugin.getDataFolder(), plugin.getStorage(), p.getUniqueId(), p.getName());
         if (migrated) {
             plugin.getLogger().info("[迁移] 已把 " + p.getName()
-                    + " 的旧版 YAML 数据导入 SQLite，原文件归档至 Data-migrated/。");
+                    + " 的旧版 YAML 数据导入存储，原文件归档至 Data-migrated/。");
+        }
+        Storage storage = plugin.getStorage();
+        if (storage instanceof CachedStorage) {
+            ((CachedStorage) storage).loadPlayer(p.getUniqueId(), p.getName());
         }
 
         plugin.ysdatas.put(p.getName(), new YSData(p.getUniqueId(), p.getName()));

@@ -37,8 +37,13 @@ import pokeshaded.SQLiteDataSource;
  * <p><b>持久性</b>：写入即提交（autocommit），不存在「等退服 / 关服才落盘」的窗口。
  * 原 YAML 版本只在 {@code onDisable} 与 {@code PlayerQuitEvent} 写盘，被 {@code taskkill /F}
  * 结束时会丢掉整个会话的变动。</p>
+ *
+ * <p><b>在存储体系里的位置</b>：本类是 {@link Storage} 的 SQLite 实现，也就是
+ * <b>裸后端</b>。插件业务读写的其实是外面那层带缓存的 {@link CachedStorage} ——
+ * 本地文件的读写是微秒级，用缓存换来的收益很小，但换来的是「换后端不改业务代码」
+ * 的统一路径。别把本类往上暴露给插件代码。</p>
  */
-public class SqliteStorage {
+public class SqliteStorage implements Storage {
 
     /** 建表语句。粘剂单独一张表，这样新增粘剂类型不需要改表结构。 */
     private static final String DDL_PLAYER =
@@ -104,6 +109,22 @@ public class SqliteStorage {
 
     public synchronized boolean isOpen() {
         return this.connection != null;
+    }
+
+    @Override
+    public String kind() {
+        return "sqlite";
+    }
+
+    @Override
+    public String describe() {
+        return "SQLite 文件 " + this.dbFile.getPath();
+    }
+
+    /** 裸后端就是自己。 */
+    @Override
+    public Storage backend() {
+        return this;
     }
 
     /** 数据库文件路径（供日志 / 测试使用）。 */
@@ -228,17 +249,20 @@ public class SqliteStorage {
     }
 
     /**
-     * 原子增减某种粘剂，{@code delta} 可以为负，结果被夹在 {@code [0, +∞)}。
+     * 把某种粘剂的数量写成绝对值（{@code amount} 为负时按 0 处理）。
      *
      * <p>先 {@code INSERT OR IGNORE} 保证行存在，再 {@code UPDATE}，而不是用
      * {@code INSERT ... ON CONFLICT DO UPDATE} —— 后者要求 SQLite ≥ 3.24，
      * 两步写法在任何版本上行为一致，也更容易在日志里看懂。</p>
      *
-     * @return 变更后的数量
+     * <p>写的是绝对值而不是 {@code amount = amount + ?}，是为了让异步写回的
+     * <b>重试幂等</b>：同一条写回被重放两次，结果与一次相同。增量写法重放一次
+     * 就会多扣一次资产。</p>
      */
-    public synchronized int addSticker(UUID uuid, String name, String type, int delta) {
+    @Override
+    public synchronized void setSticker(UUID uuid, String name, String type, int amount) {
         if (this.connection == null) {
-            return 0;
+            return;
         }
         this.touchPlayer(uuid, name);
         String id = uuid.toString();
@@ -250,8 +274,8 @@ public class SqliteStorage {
                 ps.executeUpdate();
             }
             try (PreparedStatement ps = this.connection.prepareStatement(
-                    "UPDATE pu_sticker SET amount = MAX(0, amount + ?) WHERE uuid = ? AND type = ?")) {
-                ps.setInt(1, delta);
+                    "UPDATE pu_sticker SET amount = ? WHERE uuid = ? AND type = ?")) {
+                ps.setInt(1, Math.max(amount, 0));
                 ps.setString(2, id);
                 ps.setString(3, type);
                 ps.executeUpdate();
@@ -259,7 +283,6 @@ public class SqliteStorage {
         } catch (SQLException ex) {
             ex.printStackTrace();
         }
-        return this.getSticker(uuid, type);
     }
 
     // ------------------------------------------------------------------ 保底计数

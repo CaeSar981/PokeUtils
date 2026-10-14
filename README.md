@@ -106,12 +106,18 @@ PokeUtils/
         ├── java/com/mc9y/pokeutils/
         │   ├── PokeUtils.java                主类（命令 / 经济 / 数据加载 / 粘剂定义缓存）
         │   ├── data/PlayerData.java          合成会话与三个 GUI
-        │   ├── data/YSData.java              玩家粘剂数据的薄门面（转发到 SqliteStorage）
-        │   ├── data/SqliteStorage.java       持久化唯一出口（SQLite，autocommit）
-        │   ├── data/LegacyDataMigration.java 旧版 Data/<玩家名>.yml -> SQLite 迁移 + 归档
+        │   ├── data/YSData.java              玩家粘剂数据的薄门面（转发到 Storage）
+        │   ├── data/Storage.java             存储契约（写入语义 = 绝对值，便于异步重试）
+        │   ├── data/SqliteStorage.java       SQLite 后端（裸后端，autocommit + WAL）
+        │   ├── data/MysqlStorage.java        MySQL 后端（轻量连接池 + 反射驱动直连）
+        │   ├── data/CachedStorage.java       门面：内存缓存 + 同步写穿 / 异步写回 + 退服驱逐
+        │   ├── data/StorageFactory.java      按 Storage.* 配置建后端；连不上就降级 SQLite
+        │   ├── data/Async.java               两个后台线程池（单线程写队列 + 通用计算）
+        │   ├── data/LogIndex.java            合成流水的内存索引（/pu history·stats·top 的数据源）
+        │   ├── data/LegacyDataMigration.java 旧版 Data/<玩家名>.yml -> 数据库 迁移 + 归档
         │   ├── data/StickerType.java         粘剂定义（读 config.yml 的 Compound.stickers）
         │   ├── data/VoucherType.java         合成券定义（读 config.yml 的 Compound.vouchers）
-        │   ├── data/CompoundLog.java         合成流水日志（写 logs/、按玩家聚合、排行榜）
+        │   ├── data/CompoundLog.java         合成流水日志（写 logs/、解析与聚合）
         │   └── listener/PokeCompoundPlayerListener.java  点击 / 拖拽 / 进出服 / 关界面
         └── resources/
             ├── plugin.yml
@@ -613,6 +619,101 @@ if (!getConfig().isConfigurationSection("Compound.xxx.rewards")) {
 一律用 `isConfigurationSection` / `contains` 判存在性，**禁止**用
 `getConfigurationSection(...) == null` 当条件 —— 它是个恒假条件。
 
+### 20. 数据层再进一步：SQLite / MySQL 可切换（`data/Storage.java`）
+
+第三轮把存储从 YAML 换成了 SQLite，但插件各处直接引用 `SqliteStorage` 这个具体类。
+要支持 MySQL 只有两条路：要么在每一处 `if (mysql) ... else ...`，要么先把契约抽出来。
+
+**修法**：新增 `data/Storage.java` 接口（`open / close / isOpen / kind / describe / backend /
+hasPlayer / findUuidByName / touchPlayer / getSticker / getStickers / setSticker /
+getFailStreak / setFailStreak`），`SqliteStorage` 与新增的 `MysqlStorage` 各实现一份，
+`PokeUtils#getStorage()` 的返回类型改成接口。业务代码（监听器 / 命令 / `YSData`）
+**一行都没改**。
+
+写入接口刻意收的是**绝对值**（`setSticker(uuid, name, type, amount)`）而不是增量。
+这是为异步写回量身定的：增量在重试时会被重复应用（扣两次钱），绝对值天然幂等。
+增量的便利由接口上的 `default addSticker(...)` 提供 —— 它在内存里做完读改写，
+再落到绝对值接口上。
+
+MySQL 侧有四个坑，都收敛在 `MysqlStorage` 里：
+
+1. **`TEXT` 不能做主键**（报 1170 BLOB/TEXT column used in key spec），uuid 必须
+   `VARCHAR(36)`；表用 `utf8mb4_general_ci`，让 `WHERE name = ?` 天然大小写不敏感 ——
+   SQLite 那边是靠 `COLLATE NOCASE` 做到的，两边语义要对得上。
+2. **`MAX(0, x)` 在 MySQL 上是语法错误**：SQLite 的 `MAX` 是两参标量函数，
+   MySQL 的 `MAX` 是聚合函数，夹取必须用 `GREATEST(0, x)`。
+   （已用独立探针实测确认。）现设计下这个坑踩不到 —— 夹取在 Java 侧用 `Math.max` 做掉了。
+3. **驱动不 shade、直接从服务端拿**：CatServer 1.12.2 的 `libraries/` 里就有
+   `mysql-connector-java-5.1.45.jar`，插件类加载器是父优先的，`Class.forName` 一定解析得到。
+   插件体积一个字节不涨，也不会出现「插件带 8.x、服务端带 5.1」的驱动冲突。
+4. **绕开 `DriverManager`**：它按「调用方的 ClassLoader」核对驱动是否可见，
+   失败时的报错还是那句最没用的 `No suitable driver found`。这里反射实例化驱动对象后
+   直接调 `Driver#connect(url, props)`，完全不经过 `DriverManager`；
+   驱动类名按 `com.mysql.cj.jdbc.Driver` → `com.mysql.jdbc.Driver` →
+   `org.mariadb.jdbc.Driver` 依次尝试，都失败才回退 `DriverManager`。
+   连接池是自己写的极简 `ArrayBlockingQueue` 版（借出时校验 `isValid`，
+   池满直接关），**不用**全局 synchronized —— 一次网络往返是毫秒级，全局锁会把
+   本来并行的查询排成队。
+
+**连不上就降级，绝不连坐**：MySQL 不可用时打一条 SEVERE 说明原因，然后**回退 SQLite**，
+插件照常加载。存储后端故障不该让整台服务器的合成玩法一起下线。
+（实测：停掉 MariaDB 重启服务端 → `MySQL 不可用（Connection refused: connect），
+已自动回退到 SQLite`，`Done (12.8s)`，插件功能正常。）
+
+### 21. 内存缓存 + 异步写回（`data/CachedStorage.java`）
+
+本地 SQLite 的一次查询是微秒级，加不加缓存感觉不出来；换到 MySQL 就是一次网络往返
+（局域网 1~3ms，跨机房 20~50ms）。而合成一次要点开界面、选材料、再点确认 ——
+每次界面刷新都要读一遍粘剂数量，这些全落在服务端主线程上，玩家看到的就是「点了没反应」。
+
+**修法**：`CachedStorage` 包在裸后端外面，做三件事：
+
+| 关注点 | 做法 |
+| --- | --- |
+| 读 | 在线玩家的读全部命中内存；离线玩家（`/pu g <离线>`）直接打后端，不进缓存 |
+| 写 | 改内存 + 标脏；SQLite 同步写穿，MySQL 丢给 `Async` 的**单线程**写队列 |
+| 落盘 | 退服后落盘并驱逐；关服先排空队列、再同步补一刀、最后才关连接 |
+
+三条不变量（写在这段代码的注释里，也是它唯一需要被理解的地方）：
+
+1. **只有在线玩家有缓存**：进服读入、退服落盘并驱逐。否则给几千个只发过一次货的
+   离线账号建缓存，内存会没人管地涨上去。
+2. **只在写成功之后才驱逐**：玩家秒退秒进时缓存项还在，此时进服的 `loadPlayer`
+   会复用这一项而不是去库里重读 —— 否则会用「写还没到达的旧值」把内存里更新的值覆盖回去。
+3. **写队列是单线程的**：不是省资源，而是「同一玩家的写入必须有序」这条约束的实现方式。
+   多线程之后两次写回可能并发抵达数据库，最后落盘的是哪一次取决于网络抖动。
+
+**代价是明码标价的**：异步写回意味着服务端被强杀（`taskkill /F`）时会丢掉最后几毫秒的
+写入 —— 这正是第三轮修掉的第 9 处缺陷的语义的一部分。所以默认值是
+`Storage.async.write-behind: auto`：**本地后端同步写穿（写入返回即已落盘），
+只有网络后端才异步**。要绝对安全就在配置里改成 `never`。
+
+### 22. 合成流水改成内存索引（`data/LogIndex.java`）
+
+`/pu history`、`/pu stats`、`/pu top` 原来是**每次执行**都把 `logs/` 目录读一遍、
+全量读进内存、逐行按制表符切分。日志按天分文件且保留 30 天，一个中等规模的服跑一个月
+就能有几十万行 —— 于是「玩家随手敲一条查询」变成一次几十到几百毫秒的主线程长阻塞。
+`history.max-scan-lines`（默认 5 万行）只是把「很慢」压成「有点慢」。
+
+**修法**：启动时读一次盘建索引，之后每合成一次就追加一行到内存尾部，
+超出上限从头部裁掉。命令直接在内存里聚合，主线程零 IO。
+
+**刻意不做增量统计**：增量维护要求「裁剪时把被裁掉的记录从统计里反向扣掉」，
+一处漏扣统计就永久偏掉且很难发现。既然一次全量遍历 5 万条只要 1 毫秒，
+那就每次都遍历 —— 用一点 CPU 换掉一整类隐蔽的状态不一致。
+`/pu reload` 时的重建跑在后台线程上，且**读盘在锁外做**：重建期间新落进来的行先攒着，
+结束后判重并入，不会让恰好在这一刻合成的玩家卡在主线程上。
+
+### 23. ⚠️ 新增配置键时的第二条铁律（承接第 19 条）
+
+第 19 条讲的是「双参 `get(path, def)` 不回退 jar 内置 `config.yml`，所以代码字面量默认值
+必须与出厂 `config.yml` 逐字一致」。这一轮把这条从「约定」升级成**有哨兵的回归项**：
+
+- `StorageFactory` 把出厂默认值定义成一组 `static final` 常量，紧接着一行注释说明
+  「与 `config.yml` 的 `Storage` 段逐字对应」；
+- 端到端用例 **N6** 直接用双参版本（`configGetRaw`）读回这几个键，
+  逐条断言等于出厂值。两边一旦漂移，N6 立刻红。
+
 ## 配置一览（第三轮新增键）
 
 | 键 | 默认 | 说明 |
@@ -772,13 +873,24 @@ Blank038API.getPokemonAPI()Lcom/mc9y/pokemonapi/PokemonAPI;   [static]
     **整段缺失时全部回落到与原实现逐位一致的默认值**；
     ⚠️ 但「新增段缺失」时用的是**代码里写的字面量默认值**，不是 jar 内置 `config.yml` ——
     所以两者必须一致，详见修复记录第 19 条
-- `plugins/PokeUtils-remake/pokeutils.db`：SQLite 数据库（`pu_player` / `pu_sticker` 两张表）
+  - `Storage` —— 存储后端：`type`（`sqlite` / `mysql`）、`sqlite.file`、
+    `mysql.*`（host / port / database / user / password / table-prefix / use-ssl /
+    server-timezone / pool-size / connect-timeout-ms / borrow-timeout-ms）、
+    `async`（`write-behind` = `auto` / `always` / `never`、`flush-timeout-ms`、
+    `worker-threads`）。**改 `type` 需要重启服务端**（`/pu reload` 不会重连数据库），
+    且 SQLite 与 MySQL 里是两份互相独立的数据。详见修复记录第 20~23 条
+- `plugins/PokeUtils-remake/pokeutils.db`：SQLite 数据库（`pu_player` / `pu_sticker` 两张表）。
+  用 MySQL 后端时这个文件不参与读写（但会保留在原地，切回 SQLite 时数据还在）
 - `plugins/PokeUtils-remake/Data/<玩家名>.yml`：**仅存在于升级前的旧版本**；
   玩家进服时被导入数据库并归档到 `plugins/PokeUtils-remake/Data-migrated/`（归档而非删除）
 - `plugins/PokeUtils-remake/logs/compound-<日期>.log`：合成流水日志
 
-> `config.yml` 只在改配置 / `/pu reload` 时读取；而玩家数据**每次变更立即入库**
-> （SQLite autocommit，见修复记录第 9、17 条）。
+> `config.yml` 只在改配置 / `/pu reload` 时读取；而玩家数据**变更即入库**
+> —— 同步写穿模式下写入返回时已经在盘上，异步写回模式下进入单线程队列并在
+> 退服 / 关服时排空（见修复记录第 9、17、21 条）。
+>
+> 合成流水日志（`logs/compound-<日期>.log`）只在**启动时**读一次（建内存索引），
+> 之后 `/pu history`·`/pu stats`·`/pu top` 全部读内存，不再碰磁盘（见第 22 条）。
 
 ## 说明
 

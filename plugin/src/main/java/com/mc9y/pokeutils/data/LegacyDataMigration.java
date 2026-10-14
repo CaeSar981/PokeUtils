@@ -44,7 +44,7 @@ public final class LegacyDataMigration {
      *
      * @return 是否真的搬了数据（供调用方打日志）
      */
-    public static boolean migrateIfNeeded(File dataFolder, SqliteStorage storage, UUID uuid, String name) {
+    public static boolean migrateIfNeeded(File dataFolder, Storage storage, UUID uuid, String name) {
         if (storage == null) {
             return false;
         }
@@ -72,7 +72,7 @@ public final class LegacyDataMigration {
      *
      * @return 是否真的写入了内容
      */
-    public static boolean migrate(SqliteStorage storage, File yml, UUID uuid, String name) {
+    public static boolean migrate(Storage storage, File yml, UUID uuid, String name) {
         if (storage == null || yml == null || !yml.isFile()) {
             return false;
         }
