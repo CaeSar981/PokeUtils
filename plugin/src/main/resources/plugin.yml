@@ -3,9 +3,10 @@ main: com.mc9y.pokeutils.PokeUtils
 depend:
   - PokeStar
   - Vault
-  - PokeStatsAPI
   - PokemonAPI
   - MSGToggle
+# 说明：原 plugin.yml 还声明了 - PokeStatsAPI，但全量字节码对
+# com.mc9y.pokestatsapi 零引用（反射也没有），是纯挂名依赖，故移除。
 version: 1.0
 commands:
   pokeutils:

@@ -8,6 +8,8 @@ Pixelmon（1.12.2）服务器的**精灵合成**插件。由原始 jar `PokeUtil
 > 数据目录相应变为 `plugins/PokeUtils-remake/`（从旧目录迁移即可无缝续用旧数据）。
 
 > **本版本已在原版基础上移除 PokeQuest 依赖**，同时去掉了合成时向 PokeQuest 上报任务进度的调用。
+> 另外移除了 `PokeStatsAPI` 硬依赖 —— 它是个**挂名依赖**：原版 `plugin.yml` 声明了它，
+> 但整份字节码对 `com.mc9y.pokestatsapi` 零引用（连反射都没有）。
 
 ## 功能
 
@@ -76,8 +78,10 @@ Pixelmon（1.12.2）服务器的**精灵合成**插件。由原始 jar `PokeUtil
 | Blank038API | 插件 | `Blank038API.getPokemonAPI()` 入口 —— **与 PokemonAPI 同属一个 jar**（真实 PokemonAPI 的主类就是它） |
 | MSGToggle | 插件 | 全服流水播报 |
 
-> 注意：原 `plugin.yml` 的软依赖为 `PokeStar / Vault / PokeStatsAPI / PokemonAPI / MSGToggle / PokeQuest`，
-> 其中 `PokeQuest` 已在本版本中移除（见下方「还原度验证」）。
+> 注意：原 `plugin.yml` 的依赖声明为 `PokeStar / Vault / PokeStatsAPI / PokemonAPI / MSGToggle / PokeQuest`，
+> 其中 `PokeQuest` 与 `PokeStatsAPI` 已在本版本中移除（见下方「还原度验证」）。
+> `PokeStatsAPI` 是**挂名依赖**（声明了但字节码零引用），移除后不影响任何行为，
+> 也不再需要测试服里那个占位替身。
 
 ## 目录结构
 
@@ -127,15 +131,19 @@ PokeUtils/
 | 每个方法的**局部变量表**（变量名 / 类型 / 槽位编号） | 完全一致 |
 | 外部类型调用指令种类（`invokevirtual` ↔ `invokeinterface`） | 完全一致 |
 | `config.yml` | 字节级完全一致 |
-| `plugin.yml` | 仅少 `- PokeQuest` 一行 |
+| `plugin.yml` | 少 `- PokeQuest` 与 `- PokeStatsAPI` 两行 |
 | 反编译源码比对（Vineflower） | `PlayerData` / `YSData` / `PokeUtils` **逐字节一致**；`PokeCompoundPlayerListener` **仅差 PokeQuest 两行** |
 | 依赖桩是否误打进产物 | 无（`provided` 作用域保证） |
 | 类加载 / 超类型解析 | 通过 |
 
-当前版本与原 jar 的实质差异，除**特意移除 PokeQuest** 外，还有**十一处刻意的缺陷修复**，
+当前版本与原 jar 的实质差异，除**特意移除 PokeQuest 与挂名的 PokeStatsAPI** 外，还有**十一处刻意的缺陷修复**，
 外加**两项新功能**（详见下一节「修复记录」）：
 
-1. `plugin.yml`：`depend` 列表去掉 `- PokeQuest`
+1. `plugin.yml`：`depend` 列表去掉 `- PokeQuest` 与 `- PokeStatsAPI`
+
+   - 去掉 `- PokeQuest` 是配套第 2 条（不再上报任务进度）；
+   - 去掉 `- PokeStatsAPI` 是清理**挂名依赖**：`strings` 扫过全部 class，常量池里连
+     `com.mc9y.pokestatsapi` 这个字符串都不存在，属零引用清理，行为完全不变。
 2. `PokeCompoundPlayerListener`：去掉 `Main.getQuestManager().submitQuest(p.getName(), "Compound", star1 + "")`
 
    该调用无返回值，原用于向 PokeQuest 上报 `Compound` 任务进度；移除后对合成逻辑、扣费、
