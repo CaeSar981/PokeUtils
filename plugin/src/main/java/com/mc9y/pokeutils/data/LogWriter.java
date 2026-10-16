@@ -35,6 +35,15 @@ public final class LogWriter {
     private String currentDay;
     private Writer writer;
 
+    /**
+     * 已彻底关闭（关服收尾跑过了）。
+     *
+     * <p>置位之后 {@link #append} 不再重新打开常开句柄 —— 否则关服时「drain 超时 → close
+     * → 队列里剩下的一条才执行」这个次序会让句柄被重新打开，而那时已经没有任何人再去关它。
+     * 但那一条流水也不能丢（流水是审计凭证），所以改走一次性的「开-写-关」。</p>
+     */
+    private boolean closed;
+
     public LogWriter(Logger logger) {
         this.logger = logger;
     }
@@ -48,6 +57,12 @@ public final class LogWriter {
      */
     public synchronized void append(File dir, String day, String line) {
         if (line == null || day == null) {
+            return;
+        }
+        if (this.closed) {
+            // 关服收尾之后才轮到的最后几条（Async.drain 超时的时候会发生）。
+            // 不复用句柄，也不丢 —— 见 closed 字段的说明。
+            this.appendOnce(dir, day, line);
             return;
         }
         if (this.writer != null && !day.equals(this.currentDay)) {
@@ -65,6 +80,29 @@ public final class LogWriter {
             this.logger.log(Level.WARNING, "写合成日志失败: " + ex.getMessage());
             // 句柄可能已经坏了（磁盘满 / 文件被删），关掉让下一次写入重新打开。
             this.closeQuietly();
+        }
+    }
+
+    /**
+     * 一次性的「开-写-关」。
+     *
+     * <p>只服务于 {@link #close()} 之后姗姗来迟的那几条流水。多两次系统调用的代价换的是
+     * 「审计记录一条都不丢」，这正是这个类存在的理由（见类注释）。</p>
+     */
+    private void appendOnce(File dir, String day, String line) {
+        if (!dir.exists() && !dir.mkdirs()) {
+            this.logger.warning("无法创建合成日志目录: " + dir.getPath());
+            return;
+        }
+        File file = new File(dir, "compound-" + day + ".log");
+        try (Writer one = new BufferedWriter(new OutputStreamWriter(
+                new FileOutputStream(file, true), StandardCharsets.UTF_8))) {
+            one.write(line);
+            one.write(System.lineSeparator());
+            one.flush();
+        } catch (IOException ex) {
+            this.logger.log(Level.WARNING,
+                    "关服收尾阶段补写合成日志失败，这一行会丢: " + ex.getMessage());
         }
     }
 
@@ -98,8 +136,9 @@ public final class LogWriter {
         }
     }
 
-    /** 关服收尾：刷一次并关掉句柄。 */
+    /** 关服收尾：刷一次并关掉句柄；之后 {@link #append} 改走一次性的「开-写-关」。 */
     public synchronized void close() {
+        this.closed = true;
         if (this.writer == null) {
             return;
         }

@@ -39,6 +39,15 @@ public final class StorageFactory {
     static final long DEFAULT_FLUSH_TIMEOUT = 5000L;
     static final int DEFAULT_WORKER_THREADS = 2;
     static final int DEFAULT_SQLITE_CHECKPOINT_MINUTES = 10;
+    /**
+     * MySQL 连不上时是否回退到本地 SQLite。
+     *
+     * <p>默认 true 保持既有行为。但把开关交出来是有必要的：回退意味着服务端<b>带着
+     * 另一份数据</b>上线 —— 玩家看到的粘剂数量来自本地库而不是 MySQL。数据库重启的
+     * 那几十秒里如果服也重启了，玩家会照常合成消耗，而这批变更只落在本地库里，
+     * 数据库恢复后两份数据就此分叉。宁可让存储不可用（游戏内会提示），也不该带错数据。</p>
+     */
+    static final boolean DEFAULT_MYSQL_FALLBACK = true;
 
     private StorageFactory() {
     }
@@ -67,23 +76,20 @@ public final class StorageFactory {
         String fallback = null;
 
         if ("mysql".equals(type)) {
-            MysqlStorage mysql = new MysqlStorage(logger,
-                    config.getString("Storage.mysql.host", DEFAULT_MYSQL_HOST),
-                    config.getInt("Storage.mysql.port", DEFAULT_MYSQL_PORT),
-                    config.getString("Storage.mysql.database", DEFAULT_MYSQL_DATABASE),
-                    config.getString("Storage.mysql.user", DEFAULT_MYSQL_USER),
-                    config.getString("Storage.mysql.password", DEFAULT_MYSQL_PASSWORD),
-                    config.getString("Storage.mysql.table-prefix", DEFAULT_MYSQL_TABLE_PREFIX),
-                    config.getBoolean("Storage.mysql.use-ssl", DEFAULT_MYSQL_USE_SSL),
-                    config.getString("Storage.mysql.server-timezone", DEFAULT_MYSQL_SERVER_TIMEZONE),
-                    config.getInt("Storage.mysql.pool-size", DEFAULT_MYSQL_POOL_SIZE),
-                    config.getInt("Storage.mysql.connect-timeout-ms", DEFAULT_MYSQL_CONNECT_TIMEOUT),
-                    config.getInt("Storage.mysql.borrow-timeout-ms", DEFAULT_MYSQL_BORROW_TIMEOUT));
             try {
-                mysql.open();
-                backend = mysql;
-                logger.info("MySQL 存储已就绪: " + mysql.describe());
+                backend = StorageFactory.newMysql(plugin, logger);
+                logger.info("MySQL 存储已就绪: " + backend.describe());
             } catch (Exception ex) {
+                boolean mayFallback = config.getBoolean("Storage.mysql.fallback-to-sqlite",
+                        DEFAULT_MYSQL_FALLBACK);
+                if (!mayFallback) {
+                    // 显式禁止回退：宁可让存储不可用（游戏内会给 OP 提示），
+                    // 也不带一份旧数据上线 —— 详见 DEFAULT_MYSQL_FALLBACK 的说明。
+                    String reason = "MySQL 不可用（" + StorageFactory.rootCause(ex)
+                            + "），且 Storage.mysql.fallback-to-sqlite = false，本次不启用任何存储后端。";
+                    logger.severe(reason);
+                    return new Opened(null, reason);
+                }
                 logger.severe("MySQL 存储连接失败: " + ex);
                 fallback = "MySQL 不可用（" + StorageFactory.rootCause(ex) + "），已自动回退到 SQLite。"
                         + "本地 SQLite 里的数据与 MySQL 里的是两份不同的数据，请确认这是预期行为。";
@@ -94,12 +100,9 @@ public final class StorageFactory {
         }
 
         if (backend == null) {
-            SqliteStorage sqlite = new SqliteStorage(StorageFactory.resolveFile(
-                    dataFolder, config.getString("Storage.sqlite.file", DEFAULT_SQLITE_FILE)), logger);
             try {
-                sqlite.open();
-                backend = sqlite;
-                logger.info("SQLite 存储已就绪 -> " + sqlite.getDbFile().getPath());
+                backend = StorageFactory.newSqlite(plugin, dataFolder, logger);
+                logger.info("SQLite 存储已就绪 -> " + ((SqliteStorage) backend).getDbFile().getPath());
             } catch (Exception ex) {
                 logger.severe("SQLite 存储打开失败，本插件将无法保存任何数据！");
                 logger.severe("原因: " + ex);
@@ -115,6 +118,48 @@ public final class StorageFactory {
                 ? "异步写回（主线程不等待落库，关服时排空 " + flushTimeout + "ms）"
                 : "同步写穿（写入返回即已落盘）"));
         return new Opened(cached, fallback);
+    }
+
+    /**
+     * 按指定类型<b>独立</b>打开一个裸后端（不包缓存），供 {@code /pu migrate} 打开目标端用。
+     *
+     * <p>之所以不能复用 {@link #open}：后者按 {@code Storage.type} 决定后端，而迁移恰恰
+     * 需要一个「和当前后端不同类型」的后端。这里返回的是裸后端，调用方负责 {@code close()}。</p>
+     *
+     * @throws Exception 目标端打不开（调用方应当中止迁移，而不是写出半份数据）
+     */
+    public static Storage openBackend(Plugin plugin, File dataFolder, Logger logger, String kind)
+            throws Exception {
+        return "mysql".equals(kind)
+                ? StorageFactory.newMysql(plugin, logger)
+                : StorageFactory.newSqlite(plugin, dataFolder, logger);
+    }
+
+    /** 构造并打开一个 MySQL 后端（未包装缓存）。 */
+    private static MysqlStorage newMysql(Plugin plugin, Logger logger) throws Exception {
+        FileConfiguration config = plugin.getConfig();
+        MysqlStorage mysql = new MysqlStorage(logger,
+                config.getString("Storage.mysql.host", DEFAULT_MYSQL_HOST),
+                config.getInt("Storage.mysql.port", DEFAULT_MYSQL_PORT),
+                config.getString("Storage.mysql.database", DEFAULT_MYSQL_DATABASE),
+                config.getString("Storage.mysql.user", DEFAULT_MYSQL_USER),
+                config.getString("Storage.mysql.password", DEFAULT_MYSQL_PASSWORD),
+                config.getString("Storage.mysql.table-prefix", DEFAULT_MYSQL_TABLE_PREFIX),
+                config.getBoolean("Storage.mysql.use-ssl", DEFAULT_MYSQL_USE_SSL),
+                config.getString("Storage.mysql.server-timezone", DEFAULT_MYSQL_SERVER_TIMEZONE),
+                config.getInt("Storage.mysql.pool-size", DEFAULT_MYSQL_POOL_SIZE),
+                config.getInt("Storage.mysql.connect-timeout-ms", DEFAULT_MYSQL_CONNECT_TIMEOUT),
+                config.getInt("Storage.mysql.borrow-timeout-ms", DEFAULT_MYSQL_BORROW_TIMEOUT));
+        mysql.open();
+        return mysql;
+    }
+
+    /** 构造并打开一个 SQLite 后端（未包装缓存）。 */
+    private static SqliteStorage newSqlite(Plugin plugin, File dataFolder, Logger logger) throws Exception {
+        SqliteStorage sqlite = new SqliteStorage(StorageFactory.resolveFile(dataFolder,
+                plugin.getConfig().getString("Storage.sqlite.file", DEFAULT_SQLITE_FILE)), logger);
+        sqlite.open();
+        return sqlite;
     }
 
     /** 后台计算线程数（供 {@link Async#init}）。 */

@@ -630,6 +630,17 @@ public class PokeCompoundPlayerListener implements Listener {
         }
 
         plugin.ysdatas.put(p.getName(), new YSData(p.getUniqueId(), p.getName()));
+
+        // 存储降级（MySQL 连不上 → 回退本地 SQLite）或后端打不开时，提醒在场的 OP。
+        // 启动日志已经打过 SEVERE，但运维不一定开着控制台；而这件事的后果是
+        // 「玩家看到的粘剂数量来自另一份数据」—— 比一般的报错严重，值得追着人说一遍。
+        // 每个 OP 每次进服都会收到，直到重启修好为止，这是刻意的。
+        String warning = plugin.getStorageWarning();
+        if (warning != null && p.isOp()) {
+            p.sendMessage("§c[PokeUtils] 存储没有按预期工作：");
+            p.sendMessage("§c  " + warning);
+            p.sendMessage("§7  用 §f/pu storage §7查看当前状态；在此之前不要做重要的发放或扣减。");
+        }
     }
 
     @EventHandler

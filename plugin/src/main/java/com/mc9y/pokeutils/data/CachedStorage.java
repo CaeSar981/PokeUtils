@@ -2,6 +2,7 @@ package com.mc9y.pokeutils.data;
 
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -167,6 +168,24 @@ public class CachedStorage implements Storage {
     @Override
     public boolean checkpoint() {
         return this.backend.checkpoint();
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p><b>必须透传到后端，不能读缓存</b>：这两个方法的用途是跨后端搬迁（{@code /pu migrate}）
+     * 与运维盘点，要的是「库里的权威数据」。内存缓存只覆盖<b>在线玩家</b> ——
+     * 成千上万个只被发过一次货的离线账号在缓存里根本不存在，读缓存等于把他们的资产丢掉。
+     * 调用方（{@link StorageMigrator}）会先 {@link #flushAll()} 再排水，保证脏数据已落盘。</p>
+     */
+    @Override
+    public List<PlayerRecord> listPlayers() {
+        return this.backend.listPlayers();
+    }
+
+    @Override
+    public List<StickerRecord> listStickers() {
+        return this.backend.listStickers();
     }
 
     @Override

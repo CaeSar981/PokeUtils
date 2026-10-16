@@ -9,6 +9,7 @@ import com.mc9y.pokeutils.data.LogWriter;
 import com.mc9y.pokeutils.data.PlayerData;
 import com.mc9y.pokeutils.data.Storage;
 import com.mc9y.pokeutils.data.StorageFactory;
+import com.mc9y.pokeutils.data.StorageMigrator;
 import com.mc9y.pokeutils.data.StickerType;
 import com.mc9y.pokeutils.data.VoucherType;
 import com.mc9y.pokeutils.data.YSData;
@@ -30,6 +31,7 @@ import org.bukkit.OfflinePlayer;
 import org.bukkit.Sound;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.craftbukkit.v1_12_R1.inventory.CraftItemStack;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
@@ -153,6 +155,33 @@ public class PokeUtils extends JavaPlugin {
     /** 合成流水日志目录（首次写入时创建）。 */
     private File compoundLogDir;
 
+    /**
+     * 存储迁移是否正在进行。
+     *
+     * <p>迁移跑在后台线程上（全量读 + 几千次 upsert 往返，放主线程会卡服），
+     * 所以要有这个闸门挡住「管理员连敲两次 /pu migrate」导致的并发迁移 ——
+     * 两个迁移同时往同一个目标表 upsert 虽然幂等，但会让「读到的条数」互相干扰。</p>
+     */
+    private final java.util.concurrent.atomic.AtomicBoolean migrating =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /**
+     * 启用时拍下的 {@code Storage} 段快照（键 -> 值的字符串形式）。
+     *
+     * <p>用途只有一个：{@code /pu reload} 时判断存储相关的配置是不是被改过。存储后端在
+     * {@code onEnable} 就建好了，reload <b>不会</b>重建它 —— 不提示的话，运维会以为
+     * 「改成 MySQL 已经生效」，而实际上要重启服务器。这里刻意<b>不</b>在 reload 后更新快照：
+     * 提示会一直出现，直到真正重启为止。</p>
+     */
+    private final Map<String, String> storageSnapshot = new HashMap<String, String>();
+
+    /**
+     * 存储没能按预期工作时的人话说明（MySQL 降级到 SQLite、或后端根本打不开）；
+     * 正常时为 {@code null}。降级发生时会给进服的 OP 发一次提醒 —— 详见
+     * {@link StorageFactory#DEFAULT_MYSQL_FALLBACK} 对「带错数据上线」的说明。
+     */
+    private String storageWarning;
+
     public Storage getStorage() {
         return this.storage;
     }
@@ -160,6 +189,60 @@ public class PokeUtils extends JavaPlugin {
     /** 未经缓存包装的裸存储后端（只有测试会用它来验证「数据真的落库了」）。 */
     public Storage getBackend() {
         return this.storage == null ? null : this.storage.backend();
+    }
+
+    /**
+     * 存储没能按预期工作时的人话说明（MySQL 降级回 SQLite、或后端打不开），正常时为 {@code null}。
+     *
+     * <p>启动日志当然已经打过 SEVERE，但运维不一定开着控制台 —— 所以让进服的 OP 也看得见。</p>
+     */
+    public String getStorageWarning() {
+        return this.storageWarning;
+    }
+
+    /**
+     * 两份 {@code Storage} 段快照的差异键（按字母序，输出稳定，便于测试断言）。
+     *
+     * <p>「一边有一边没有」也算差异 —— 那正是「原本没配 Storage 段的服后来补了一段」的情形。</p>
+     */
+    private List<String> diffStorageConfig(Map<String, String> before, Map<String, String> after) {
+        java.util.TreeSet<String> keys = new java.util.TreeSet<String>();
+        keys.addAll(before.keySet());
+        keys.addAll(after.keySet());
+        List<String> changed = new ArrayList<String>();
+        for (String key : keys) {
+            String old = before.get(key);
+            String now = after.get(key);
+            if (old == null ? now != null : !old.equals(now)) {
+                changed.add(key);
+            }
+        }
+        return changed;
+    }
+
+    /**
+     * 把 config.yml 的 {@code Storage} 段拍平成「键 -> 值字符串」，供 {@code /pu reload}
+     * 比对「哪些改动需要重启服务器才生效」。
+     *
+     * <p><b>两个 Bukkit 坑要避开</b>：① {@code getConfigurationSection} 在「本段没配、
+     * 但 jar 内置 config.yml 有」时返回的是一个<b>空段</b>而不是 null，所以这里把
+     * 「null」与「空段」当成同一件事（这个服根本没有 Storage 段）；② 用 {@code getKeys(true)}
+     * 拿全部嵌套键，否则 {@code Storage.mysql.host} 这种改动比不出来。</p>
+     */
+    private Map<String, String> snapshotStorageConfig() {
+        Map<String, String> out = new HashMap<String, String>();
+        ConfigurationSection section = this.getConfig().getConfigurationSection("Storage");
+        if (section == null || section.getKeys(true).isEmpty()) {
+            return out;
+        }
+        for (String key : section.getKeys(true)) {
+            Object value = section.get(key);
+            if (value instanceof ConfigurationSection) {
+                continue;
+            }
+            out.put(key, String.valueOf(value));
+        }
+        return out;
     }
 
     /** 合成流水的内存索引。 */
@@ -1033,8 +1116,17 @@ public class PokeUtils extends JavaPlugin {
         // MySQL 连不上会自动回退 SQLite 并打 SEVERE，绝不因为连不上库就让插件启用失败。
         StorageFactory.Opened opened = StorageFactory.open(this, this.getDataFolder(), this.getLogger());
         this.storage = opened.storage;
+        // 拍一份 Storage 段快照，供 /pu reload 判断「哪些改动需要重启才生效」。
+        this.storageSnapshot.clear();
+        this.storageSnapshot.putAll(this.snapshotStorageConfig());
         if (this.storage == null) {
             this.getLogger().severe("存储后端不可用，本插件将无法保存任何数据（合成仍可进行，但粘剂与保底计数不会持久化）。");
+            this.storageWarning = opened.fallbackReason != null ? opened.fallbackReason
+                    : "存储后端不可用，粘剂与保底计数不会持久化。";
+        } else {
+            // 非 null 表示发生过降级（当前只有「MySQL 连不上 → 回退 SQLite」这一种）。
+            // 后台日志已经打过 SEVERE，但运维不一定开着控制台 —— 这里留着给进服的 OP 看。
+            this.storageWarning = opened.fallbackReason;
         }
 
         for (Player player : Bukkit.getOnlinePlayers()) {
@@ -1159,6 +1251,8 @@ public class PokeUtils extends JavaPlugin {
                 sender.sendMessage("§6/pu §ftake <玩家> <类型> <数量> - §e扣除粘剂（支持离线玩家）");
                 sender.sendMessage("§6/pu §fbal [玩家] - §e查询粘剂余额");
                 sender.sendMessage("§6/pu §fdebug <玩家> - §e查看某个玩家的合成状态与成功率构成");
+                sender.sendMessage("§6/pu §fstorage - §e查看存储后端状态（缓存 / 落盘 / 熔断）");
+                sender.sendMessage("§6/pu §fmigrate <sqlite|mysql> [dry-run] - §e把数据整体搬到另一个后端");
                 sender.sendMessage("§6/pu §freload - §e重载插件配置文件");
             }
             sender.sendMessage("§a==============================================");
@@ -1207,6 +1301,17 @@ public class PokeUtils extends JavaPlugin {
                 });
             }
             sender.sendMessage("§b精灵信息 §f// §a插件配置重载完成！");
+            // 存储段是 reload 唯一覆盖不到的部分：后端在 onEnable 就建好了，换 type、
+            // 改 host、调 pool-size 都得重启服务器。不提示的话运维会以为已经生效。
+            // 快照刻意不在这里更新 —— 提示会一直出现，直到真正重启为止。
+            List<String> storageChanged = this.diffStorageConfig(this.storageSnapshot,
+                    this.snapshotStorageConfig());
+            if (!storageChanged.isEmpty()) {
+                sender.sendMessage("§e 注意：以下 " + storageChanged.size()
+                        + " 项存储配置本次重载**不会**生效（存储后端只在启用时建立，需重启服务器）：");
+                sender.sendMessage("§7  " + joinWith(storageChanged, "§7, §f"));
+                sender.sendMessage("§7  改完记得把 config.yml 的 Storage 段定稿，重启后用 /pu storage 复核。");
+            }
         } else if (args[0].equalsIgnoreCase("history")) {
             this.handleHistoryCommand(sender, args);
         } else if (args[0].equalsIgnoreCase("stats")) {
@@ -1221,6 +1326,10 @@ public class PokeUtils extends JavaPlugin {
             this.handleStickerCommand(sender, args, false);
         } else if (args[0].equalsIgnoreCase("bal")) {
             this.handleBalanceCommand(sender, args);
+        } else if (args[0].equalsIgnoreCase("storage") && sender.hasPermission("pokeutils.admin")) {
+            this.handleStorageCommand(sender);
+        } else if (args[0].equalsIgnoreCase("migrate") && sender.hasPermission("pokeutils.admin")) {
+            this.handleMigrateCommand(sender, args);
         }
         return false;
     }
@@ -1415,6 +1524,160 @@ public class PokeUtils extends JavaPlugin {
             }
         }
         sender.sendMessage("§a==============================================");
+    }
+
+    /**
+     * {@code /pu storage} —— 存储后端的一眼诊断。
+     *
+     * <p><b>为什么要有这条命令</b>：{@link CachedStorage} 一直在维护「连续失败次数 /
+     * 熔断窗口 / 未落盘条目数 / 缓存玩家数」这些量，但在此之前<b>只有测试替身能读到它们</b>
+     * （靠反射）。运维遇到「玩家说粘剂没到账」时，唯一的手段是翻 {@code latest.log} 找
+     * SEVERE，而 SEVERE 只在写入失败那一刻打一次 —— 事后去翻常常已经被滚掉了。</p>
+     *
+     * <p>这条命令只是把<b>已经存在</b>的可观测性接出来：不新增状态、不做任何 IO、
+     * 不碰任何一端的数据，所以它在后端已经出问题的时候依然能跑。</p>
+     */
+    private void handleStorageCommand(CommandSender sender) {
+        sender.sendMessage("§a========= §e存储后端状态 §a=========");
+        Storage storage = this.storage;
+        if (storage == null) {
+            sender.sendMessage("§c 存储不可用 —— 合成仍可正常进行，但粘剂与保底计数不会持久化。");
+            sender.sendMessage("§7 请查启动日志里的 SEVERE（数据库文件不可写 / MySQL 不可达 / 已禁止回退）。");
+            sender.sendMessage("§a==============================================");
+            return;
+        }
+        sender.sendMessage("§7 后端: §f" + storage.describe());
+        if (storage instanceof CachedStorage) {
+            CachedStorage cached = (CachedStorage) storage;
+            sender.sendMessage("§7 写模式: §f" + (cached.isWriteBehind()
+                    ? "异步写回（主线程不等落库）" : "同步写穿（写入返回即已落盘）"));
+            int queued = Async.pending();
+            sender.sendMessage("§7 写队列积压: §f" + queued + " §7条" + (queued > 0
+                    ? " §8（关服时会等待排空，超时才放弃）" : ""));
+            int dirty = cached.dirtyCount();
+            sender.sendMessage("§7 缓存玩家: §f" + cached.cachedPlayers()
+                    + " §7| 未落盘条目: §f" + dirty + (dirty > 0
+                    ? " §c（正在按退避重试，或等待下一次扫描）" : ""));
+            sender.sendMessage("§7 连续写失败: §f" + cached.consecutiveFailures() + " §7| 熔断: "
+                    + (cached.isBroken()
+                    ? "§c已触发，剩余 " + cached.breakerRemainingMs() + "ms"
+                    : "§a未触发"));
+        }
+        if (this.logIndex != null) {
+            sender.sendMessage("§7 流水索引: §f" + this.logIndex.size() + " §7条（上限 §f"
+                    + this.getLogMaxScanLines() + " §7条，保留 §f" + this.getLogKeepDays() + " §7天）");
+        }
+        sender.sendMessage("§a==============================================");
+    }
+
+    /**
+     * {@code /pu migrate <sqlite|mysql> [dry-run]} —— 把玩家数据整体搬到另一个后端。
+     *
+     * <p>典型场景：先用 SQLite 跑着，后来改上 MySQL（或反过来做一次冷备份）。
+     * 命令<b>只读源端、只写目标端</b>，目标端用绝对值 upsert，所以中途失败后重跑一次
+     * 即对齐，不需要先清理（细节见 {@link StorageMigrator}）。</p>
+     *
+     * <p><b>跑在后台线程上</b>：全量读 + 几千次 upsert 往返，放主线程足够卡服几秒到几十秒。</p>
+     */
+    private void handleMigrateCommand(final CommandSender sender, String[] args) {
+        if (args.length < 2) {
+            sender.sendMessage("§b精灵信息 §f// §c用法: /pu migrate <sqlite|mysql> [dry-run]");
+            return;
+        }
+        String target = args[1].trim().toLowerCase();
+        if (!"sqlite".equals(target) && !"mysql".equals(target)) {
+            sender.sendMessage("§b精灵信息 §f// §c目标后端只能是 sqlite 或 mysql。");
+            return;
+        }
+        final Storage source = this.storage;
+        if (source == null) {
+            sender.sendMessage("§b精灵信息 §f// §c当前没有可用的存储后端，无法迁移。");
+            return;
+        }
+        final String current = source.kind();
+        if (target.equals(current)) {
+            sender.sendMessage("§b精灵信息 §f// §e目标后端与当前后端相同（" + current + "），无需迁移。");
+            return;
+        }
+        if (!this.migrating.compareAndSet(false, true)) {
+            sender.sendMessage("§b精灵信息 §f// §e已经有一个迁移在进行中，请等它结束。");
+            return;
+        }
+        final boolean dryRun = args.length >= 3 && "dry-run".equalsIgnoreCase(args[2]);
+
+        // 目标端在**主线程**打开：打开后端要读 config.yml，而 FileConfiguration 不是线程安全的
+        // （reloadConfig 会在同一个对象上重新解析）。建连接本身只是一次性的几毫秒。
+        // 之后的「全量读 + 几千次 upsert」才挪到后台线程。
+        final Storage targetBackend;
+        try {
+            targetBackend = StorageFactory.openBackend(this, this.getDataFolder(), this.getLogger(), target);
+        } catch (Exception ex) {
+            this.migrating.set(false);
+            sender.sendMessage("§b精灵信息 §f// §c目标后端 " + target + " 打不开：" + ex.getMessage());
+            sender.sendMessage("§7 没有写入任何数据。请先核对 config.yml 的 Storage 段与 /pu storage。");
+            return;
+        }
+
+        sender.sendMessage("§b精灵信息 §f// §e开始迁移 §f" + current + " §e-> §f" + target
+                + (dryRun ? "§e（干跑，不会写入任何数据）" : "§e，跑在后台线程上，结果稍后贴出"));
+        final PokeUtils plugin = this;
+        Async.compute(new Runnable() {
+            @Override
+            public void run() {
+                StorageMigrator.Result result = null;
+                String failure = null;
+                try {
+                    result = StorageMigrator.migrate(plugin.getLogger(), source, targetBackend, target, dryRun);
+                } catch (Throwable t) {
+                    plugin.getLogger().severe("迁移出现未预期的错误: " + t);
+                    failure = String.valueOf(t);
+                }
+                final StorageMigrator.Result done = result;
+                final String error = failure;
+                // 消息必须回到主线程发：玩家 / 控制台的 sendMessage 契约都在主线程。
+                Async.main(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (done == null) {
+                            sender.sendMessage("§c迁移因未预期的错误中断：" + error);
+                            plugin.getLogger().severe("[migrate] 因未预期的错误中断: " + error);
+                            plugin.migrating.set(false);
+                            return;
+                        }
+                        for (String line : done.messages) {
+                            sender.sendMessage(line);
+                            // 同时写进服务端日志。原因：通过 RCON 执行时，命令返回后那条
+                            // 连接就断了，异步回来的结果 sendMessage 给谁都没人接 ——
+                            // 而 RCON 恰恰是「后台托管的服」唯一能用的通道（本项目试验过：
+                            // 拿不到控制台 stdin）。运维不该因为换了通道就看不到迁移结果。
+                            plugin.getLogger().info("[migrate] " + PokeUtils.stripColors(line));
+                        }
+                        plugin.migrating.set(false);
+                    }
+                });
+            }
+        });
+    }
+
+    /**
+     * 去掉 {@code §} / {@code &} 颜色代码，供写进服务端日志。
+     *
+     * <p>日志文件里不该出现终端转义序列 —— 那样 grep 与日志平台都很难处理。</p>
+     */
+    private static String stripColors(String text) {
+        if (text == null) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder(text.length());
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c == '§' || c == '&') {
+                i++;   // 连同后面的颜色码字符一起跳过
+                continue;
+            }
+            sb.append(c);
+        }
+        return sb.toString();
     }
 
     /**

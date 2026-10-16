@@ -6,7 +6,9 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.logging.Level;
@@ -282,6 +284,68 @@ public class SqliteStorage implements Storage {
             this.log("getStickers", ex);
         }
         return out;
+    }
+
+    /**
+     * 全部玩家的主记录。给 {@code /pu migrate} 用 —— 一次查完，不做 N+1
+     * （理由见 {@link Storage#listPlayers()}）。
+     */
+    @Override
+    public synchronized List<Storage.PlayerRecord> listPlayers() {
+        List<Storage.PlayerRecord> out = new ArrayList<Storage.PlayerRecord>();
+        if (this.connection == null) {
+            return out;
+        }
+        try (PreparedStatement ps = this.connection.prepareStatement(
+                "SELECT uuid, name, fail_streak FROM pu_player");
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                UUID uuid = SqliteStorage.parseUuid(rs.getString(1));
+                if (uuid != null) {
+                    out.add(new Storage.PlayerRecord(uuid, rs.getString(2), rs.getInt(3)));
+                }
+            }
+        } catch (SQLException ex) {
+            this.log("listPlayers", ex);
+        }
+        return out;
+    }
+
+    /** 全部粘剂行。给 {@code /pu migrate} 用。 */
+    @Override
+    public synchronized List<Storage.StickerRecord> listStickers() {
+        List<Storage.StickerRecord> out = new ArrayList<Storage.StickerRecord>();
+        if (this.connection == null) {
+            return out;
+        }
+        try (PreparedStatement ps = this.connection.prepareStatement(
+                "SELECT uuid, type, amount FROM pu_sticker");
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                UUID uuid = SqliteStorage.parseUuid(rs.getString(1));
+                if (uuid != null) {
+                    out.add(new Storage.StickerRecord(uuid, rs.getString(2), rs.getInt(3)));
+                }
+            }
+        } catch (SQLException ex) {
+            this.log("listStickers", ex);
+        }
+        return out;
+    }
+
+    /**
+     * 库里的 uuid 存的是字符串。手工改过库的脏数据解析失败时<b>跳过这一行</b>，
+     * 而不是让它把整段盘点炸掉。
+     */
+    private static UUID parseUuid(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return UUID.fromString(raw.trim());
+        } catch (IllegalArgumentException ex) {
+            return null;
+        }
     }
 
     /**

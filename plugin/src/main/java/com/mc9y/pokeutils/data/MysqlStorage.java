@@ -7,7 +7,9 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
@@ -426,6 +428,71 @@ public class MysqlStorage implements Storage {
             this.release(connection);
         }
         return out;
+    }
+
+    /**
+     * 全部玩家的主记录。给 {@code /pu migrate} 用 —— 一次查完，不做 N+1
+     * （理由见 {@link Storage#listPlayers()}）。
+     */
+    @Override
+    public List<Storage.PlayerRecord> listPlayers() {
+        List<Storage.PlayerRecord> out = new ArrayList<Storage.PlayerRecord>();
+        Connection connection = null;
+        try {
+            connection = this.borrow();
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "SELECT uuid, name, fail_streak FROM " + this.table("player"));
+                 ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    UUID uuid = MysqlStorage.parseUuid(rs.getString(1));
+                    if (uuid != null) {
+                        out.add(new Storage.PlayerRecord(uuid, rs.getString(2), rs.getInt(3)));
+                    }
+                }
+            }
+        } catch (SQLException ex) {
+            this.logger.log(java.util.logging.Level.SEVERE, "MySQL 查询失败(listPlayers): " + ex, ex);
+        } finally {
+            this.release(connection);
+        }
+        return out;
+    }
+
+    /** 全部粘剂行。给 {@code /pu migrate} 用。 */
+    @Override
+    public List<Storage.StickerRecord> listStickers() {
+        List<Storage.StickerRecord> out = new ArrayList<Storage.StickerRecord>();
+        Connection connection = null;
+        try {
+            connection = this.borrow();
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "SELECT uuid, type, amount FROM " + this.table("sticker"));
+                 ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    UUID uuid = MysqlStorage.parseUuid(rs.getString(1));
+                    if (uuid != null) {
+                        out.add(new Storage.StickerRecord(uuid, rs.getString(2), rs.getInt(3)));
+                    }
+                }
+            }
+        } catch (SQLException ex) {
+            this.logger.log(java.util.logging.Level.SEVERE, "MySQL 查询失败(listStickers): " + ex, ex);
+        } finally {
+            this.release(connection);
+        }
+        return out;
+    }
+
+    /** 脏数据（手工改过库）解析失败时跳过这一行，而不是让它把整段盘点炸掉。 */
+    private static UUID parseUuid(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return UUID.fromString(raw.trim());
+        } catch (IllegalArgumentException ex) {
+            return null;
+        }
     }
 
     @Override

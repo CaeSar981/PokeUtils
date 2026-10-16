@@ -1,5 +1,7 @@
 package com.mc9y.pokeutils.data;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -108,5 +110,51 @@ public interface Storage {
      */
     default boolean checkpoint() {
         return false;
+    }
+
+    /**
+     * 全部玩家的主记录。给 {@code /pu migrate}（跨后端搬迁）与运维盘点用。
+     *
+     * <p><b>为什么是批量接口而不是「先列出 UUID 再逐个查」</b>：后者是标准的 N+1 ——
+     * 一万个玩家就是一万次查询，换成 MySQL 就是一万次网络往返。搬迁这种一次性动作
+     * 也经不起这个量级。</p>
+     *
+     * <p>默认返回空表（而不是抛异常）：它属于<b>运维能力</b>，不是业务契约。
+     * 某个后端忘了覆写时，表现应当是「迁移搬了 0 条、并如实告诉你 0 条」，
+     * 而不是把一条未实现异常抛到命令执行者脸上。</p>
+     */
+    default List<PlayerRecord> listPlayers() {
+        return new ArrayList<PlayerRecord>();
+    }
+
+    /** 全部粘剂行。理由同 {@link #listPlayers()}。 */
+    default List<StickerRecord> listStickers() {
+        return new ArrayList<StickerRecord>();
+    }
+
+    /** {@code pu_player} 的一行。 */
+    final class PlayerRecord {
+        public final UUID uuid;
+        public final String name;
+        public final int failStreak;
+
+        public PlayerRecord(UUID uuid, String name, int failStreak) {
+            this.uuid = uuid;
+            this.name = name;
+            this.failStreak = failStreak;
+        }
+    }
+
+    /** {@code pu_sticker} 的一行。 */
+    final class StickerRecord {
+        public final UUID uuid;
+        public final String type;
+        public final int amount;
+
+        public StickerRecord(UUID uuid, String type, int amount) {
+            this.uuid = uuid;
+            this.type = type;
+            this.amount = amount;
+        }
     }
 }
