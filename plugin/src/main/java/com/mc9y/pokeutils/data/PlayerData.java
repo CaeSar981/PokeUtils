@@ -24,8 +24,35 @@ import org.bukkit.scheduler.BukkitRunnable;
  */
 public class PlayerData {
 
-    private int slot1 = -1;
-    private int slot2 = -1;
+    /**
+     * 电脑盒子选料界面的标题。
+     *
+     * <p>公开出来是因为「谁来建界面」与「谁来响应点击」在两个类里，标题必须一字不差 ——
+     * 两处各写一遍字面量，改名时漏掉一处界面就点不动了，而且不会报错。</p>
+     */
+    public static final String GUI_PC_SELECT = "§8从电脑盒子选精灵";
+
+    /** 「从电脑盒子选精灵」入口在选料界面上的槽位（45 格里的一格，原先是灰玻璃）。 */
+    public static final int PC_ENTRY_SLOT = 40;
+
+    /** 电脑盒子选料界面上，装精灵的那一段槽位（0 起、连续），也就是一箱的容量上限。 */
+    public static final int PC_CONTENT_SLOTS = 30;
+
+    /**
+     * 材料槽位 1 / 2。{@code null} = 未选。
+     *
+     * <p>原本是两个 {@code int}（队伍下标，-1 表示未选）。加「从电脑盒子取料」之后
+     * 下标表达不了坐标，改成 {@link MaterialRef}：队伍与电脑盒子各有自己的坐标系，
+     * 解析与实际摘除统一交给 {@link MaterialAccess}。</p>
+     */
+    private MaterialRef material1 = null;
+    private MaterialRef material2 = null;
+    /** 电脑盒子选料界面正在为哪个材料槽位选料（1 或 2）。 */
+    private int pcTargetSlot = 1;
+    /** 电脑盒子选料界面当前翻到的箱子下标（0 基）。 */
+    private int pcBox = 0;
+    /** 电脑盒子选料界面的星级筛选：0 = 不筛，1~7 = 只看该星级。 */
+    private int pcStarFilter = 0;
     private String ys = null;
     private boolean select = false;
     private int jl;
@@ -50,23 +77,71 @@ public class PlayerData {
         return this.select;
     }
 
-    public int getSlot1() {
-        return this.slot1;
+    public MaterialRef getMaterial1() {
+        return this.material1;
     }
 
-    public void setSlot1(int i) {
-        this.slot1 = i;
+    public void setMaterial1(MaterialRef ref) {
+        this.material1 = ref;
         // 换了材料，之前的二次确认就作废了 —— 否则玩家可以「先放便宜材料骗过确认，再换成六星」
         this.confirmed = false;
     }
 
-    public void setSlot2(int i) {
-        this.slot2 = i;
+    public MaterialRef getMaterial2() {
+        return this.material2;
+    }
+
+    public void setMaterial2(MaterialRef ref) {
+        this.material2 = ref;
         this.confirmed = false;
     }
 
+    /**
+     * 队伍下标投影（<b>兼容口径，不是状态</b>）：队伍来源时返回队伍下标，未选或电脑来源返回 -1。
+     *
+     * <p>材料本身只有 {@link #material1} / {@link #material2} 一份状态，这两个方法是从它推出来的视图。
+     * 保留它们是因为有几处消费方只关心队伍那一条路径：{@code /pu debug} 的展示口径，
+     * 以及测试替身按名字反射读会话的断言（{@code Harness#sessionSlot1}，断言的是 {@code "0/1"}）。
+     * 它们此前拿到的就是队伍下标，这里保持同一个口径。</p>
+     *
+     * <p>⚠️ <b>不要拿它去判「材料选没选」</b> —— 电脑来源会返回 -1，与「未选」撞车。
+     * 那种判断请用 {@code getMaterial1() != null}。</p>
+     */
+    public int getSlot1() {
+        return this.material1 == null ? -1 : this.material1.toPartyIndex();
+    }
+
     public int getSlot2() {
-        return this.slot2;
+        return this.material2 == null ? -1 : this.material2.toPartyIndex();
+    }
+
+    /** {@code /pu debug} 的展示口径：队伍来源写数字、电脑来源写「箱子N·槽M」、未选写 -1。 */
+    public String describeMaterial1() {
+        return this.material1 == null ? "-1" : this.material1.describe();
+    }
+
+    public String describeMaterial2() {
+        return this.material2 == null ? "-1" : this.material2.describe();
+    }
+
+    public int getPcTargetSlot() {
+        return this.pcTargetSlot;
+    }
+
+    public int getPcBox() {
+        return this.pcBox;
+    }
+
+    public void setPcBox(int box) {
+        this.pcBox = box;
+    }
+
+    public int getPcStarFilter() {
+        return this.pcStarFilter;
+    }
+
+    public void setPcStarFilter(int starFilter) {
+        this.pcStarFilter = starFilter;
     }
 
     public String getYS() {
@@ -196,15 +271,26 @@ public class PlayerData {
 
         // 新增（玩家体验）：把「连续失败保底」的进度显示出来。
         // 保底是上一轮加的功能，但玩家在界面上看不到进度时，这个机制等于不存在。
-        if (PokeUtils.getInstance().isPityEnabled() && PokeUtils.getInstance().getPityThreshold() > 0) {
+        //
+        // 新增（A2 保底分档）：进度与阈值都按「当前选中的材料档位」算。
+        // 材料还没选齐（this.star == 0）时 getPityThreshold(0) 回退到单值默认 ——
+        // 显示的数字与原来一致，所以界面不会因为这次改动而变样。
+        if (PokeUtils.getInstance().isPityEnabled()) {
             int streak = PokeUtils.getInstance().getFailStreak(p);
-            int threshold = PokeUtils.getInstance().getPityThreshold();
-            fg2lores.add("§3");
-            fg2lores.add("§7 §k||§e 连续失败: §f" + streak + " §e/ §f" + threshold);
-            if (streak >= threshold) {
-                fg2lores.add("§7 §k||§d 本次必定成功（保底已触发）");
-            } else {
-                fg2lores.add("§7 §k||§7 再失败 §f" + (threshold - streak) + " §7次触发保底");
+            int failStar = PokeUtils.getInstance().getFailStar(p);
+            int threshold = PokeUtils.getInstance().getPityThreshold(this.star);
+            // this.star <= 0 时不算「换档」—— 材料都没选，谈不上档位不匹配。
+            boolean starMatched = this.star <= 0 || failStar == 0 || failStar == this.star;
+            if (threshold > 0) {
+                fg2lores.add("§3");
+                fg2lores.add("§7 §k||§e 连续失败: §f" + streak + " §e/ §f" + threshold);
+                if (!starMatched) {
+                    fg2lores.add("§7 §k||§7 已换档位, 失败计数将从 1 重新累计");
+                } else if (streak >= threshold) {
+                    fg2lores.add("§7 §k||§d 本次必定成功（保底已触发）");
+                } else {
+                    fg2lores.add("§7 §k||§7 再失败 §f" + (threshold - streak) + " §7次触发保底");
+                }
             }
         }
 
@@ -246,21 +332,21 @@ public class PlayerData {
         }
 
         int[] pzslots = new int[]{12, 14};
-        PlayerPartyStorage pps = Pixelmon.storageManager.getParty(p.getUniqueId());
         for (int i : pzslots) {
-            int slotIndex = i == 12 ? this.slot1 : this.slot2;
-            Pokemon pokemon = slotIndex == -1 ? null : pps.get(slotIndex);
-            // 修复（新增防护）：这里的 pokemon 有两种情况会是 null ——
-            //   ① 该槽位还没选（slotIndex == -1）；
-            //   ② 选过，但那只精灵已经被移走了（界面开着的时候队伍被其他插件/指令改动）。
+            MaterialRef ref = i == 12 ? this.material1 : this.material2;
+            Pokemon pokemon = MaterialAccess.resolve(p, ref);
+            // 修复（新增防护）：这里的 pokemon 有三种情况会是 null ——
+            //   ① 该槽位还没选（ref == null）；
+            //   ② 选过，但那只精灵已经被移走（界面开着的时候队伍被其他插件/指令改动）；
+            //   ③ 新增（A1）：选过，但那只精灵在电脑盒子里被挪走了。
             // 原实现只判了 ①，②会一路走到 getSpriteItem(null) / getPokemonName(null) 上抛空指针。
-            // 顺带在 ② 的情况下把失效的槽位重置掉，免得玩家一直被锁在一只不存在的精灵上。
+            // 顺带在 ② / ③ 的情况下把失效的槽位重置掉，免得玩家一直被锁在一只不存在的精灵上。
             if (pokemon == null) {
-                if (slotIndex != -1) {
+                if (ref != null) {
                     if (i == 12) {
-                        this.slot1 = -1;
+                        this.material1 = null;
                     } else {
-                        this.slot2 = -1;
+                        this.material2 = null;
                     }
                 }
                 ItemStack pz = new ItemStack(Material.BARRIER);
@@ -273,6 +359,13 @@ public class PlayerData {
             ItemStack item = Blank038API.getPokemonAPI().getSpriteHelper().getSpriteItem(pokemon);
             ItemMeta im = item.getItemMeta();
             im.setDisplayName("§f" + PokemonUtil.getPokemonName(pokemon));
+            // 新增（A1）：材料来自电脑盒子时把出处标出来。主界面上两只材料都只是一个图标，
+            // 不标的话玩家分不清「这只我已经从队伍拿出来了」还是「还在箱子里」。
+            if (ref != null && ref.isPc()) {
+                List<String> materialLores = new ArrayList<String>();
+                materialLores.add("§7来源: §f" + ref.describe());
+                im.setLore(materialLores);
+            }
             item.setItemMeta(im);
             inv.setItem(i, item);
         }
@@ -349,7 +442,151 @@ public class PlayerData {
             }
         }
 
+        // 新增（A1）：进电脑盒子的入口。
+        // 队伍只有 6 格，而玩家想升的往往是躺在盒子里的收藏品 —— 以前必须先开 PC 把它取进队伍、
+        // 还得先腾出空位，才能回来点合成。那一段摩擦每次合成都得付一遍。
+        // 开关关掉时不画这个按钮，点上去只会落到灰玻璃上，没有任何反应（也不会误开界面）。
+        if (PokeUtils.getInstance().isPcSelectionEnabled()) {
+            ItemStack pcEntry = new ItemStack(Material.ENDER_CHEST, 1);
+            ItemMeta pcim = pcEntry.getItemMeta();
+            pcim.setDisplayName("§b从电脑盒子选精灵 §f(§e点击打开§f)");
+            List<String> pclores = new ArrayList<String>();
+            pclores.add("§b");
+            pclores.add("§7 §k||§7 盒子里的精灵可以直接当合成材料");
+            pclores.add("§7 §k||§7 不需要先移进队伍");
+            pcim.setLore(pclores);
+            pcEntry.setItemMeta(pcim);
+            inv.setItem(PC_ENTRY_SLOT, pcEntry);
+        }
+
         p.closeInventory();
+        p.openInventory(inv);
+    }
+
+    /**
+     * 从「选料界面」进入电脑盒子选料：先定位到某个材料槽位，再渲染。
+     *
+     * <p>每次进来都重置星级筛选（0 = 全部）—— 筛选是上一次的选择，跨会话保留会让人困惑
+     * （「为什么我的盒子里只有三只精灵」）。箱子下标则刻意保留，方便连续挑同箱的几只。</p>
+     */
+    public void beginPcSelect(Player p, int targetSlot) {
+        this.pcTargetSlot = targetSlot == 2 ? 2 : 1;
+        this.pcStarFilter = 0;
+        this.openPcSelectGui(p);
+    }
+
+    /**
+     * 渲染电脑盒子选料界面。
+     *
+     * <p>布局：槽 0~29 是当前箱子的精灵，槽 45 上一箱 / 46 箱子信息 / 47 星级筛选 /
+     * 49 返回合成界面 / 53 下一箱 —— 翻页按钮的位置与「产出预览」界面保持一致。</p>
+     *
+     * <p>这里<b>只是渲染</b>，箱子与筛选状态由调用方先改好（{@link #setPcBox} /
+     * {@link #setPcStarFilter}）再调本方法。这样「点上一箱」和「点筛选」走的是同一条重绘路径。</p>
+     */
+    public void openPcSelectGui(Player p) {
+        int boxes = MaterialAccess.boxCount(p);
+        if (boxes <= 0) {
+            p.sendMessage("§3精灵合成 §f|| §c读取不到电脑盒子数据, 请重新进服后再试!");
+            return;
+        }
+        // 兜住越界：箱子数可能因为服务端配置变化而减少，而 pcBox 是上一轮存下来的。
+        if (this.pcBox < 0) {
+            this.pcBox = 0;
+        } else if (this.pcBox >= boxes) {
+            this.pcBox = boxes - 1;
+        }
+
+        Inventory inv = Bukkit.createInventory(null, 54, GUI_PC_SELECT);
+
+        ItemStack fg = new ItemStack(Material.STAINED_GLASS_PANE, 1, (short) 15);
+        ItemMeta fgim = fg.getItemMeta();
+        fgim.setDisplayName("§a");
+        fg.setItemMeta(fgim);
+        for (int i = PC_CONTENT_SLOTS; i < 54; i++) {
+            inv.setItem(i, fg);
+        }
+
+        PokeStarAPI psa = new PokeStarAPI();
+        int capacity = Math.min(MaterialAccess.boxCapacity(p), PC_CONTENT_SLOTS);
+        int total = 0;
+        int shown = 0;
+        for (int slot = 0; slot < capacity; slot++) {
+            MaterialRef ref = MaterialRef.ofPc(this.pcBox, slot);
+            Pokemon pokemon = MaterialAccess.resolve(p, ref);
+            if (pokemon == null) {
+                continue;
+            }
+            total += 1;
+            int pokeStar = psa.getPokemonStar(pokemon.getSpecies().name());
+            if (this.pcStarFilter > 0 && pokeStar != this.pcStarFilter) {
+                continue;
+            }
+            ItemStack item = Blank038API.getPokemonAPI().getSpriteHelper().getSpriteItem(pokemon);
+            ItemMeta im = item.getItemMeta();
+            im.setDisplayName("§f" + PokemonUtil.getPokemonName(pokemon) + " (" + psa.getPokeShowName(pokeStar) + "§f)");
+            List<String> lores = new ArrayList<String>();
+            lores.add("§7位置: §f" + ref.describe());
+            // 已经在另一个材料槽位上选过的，直接标出来 —— 否则玩家点下去只会收到一句拒绝，
+            // 而界面上看不出到底哪只冲突了。判定仍以点击时为准（这里只是提示）。
+            if (MaterialRef.same(ref, this.material1) || MaterialRef.same(ref, this.material2)) {
+                lores.add("§c已在其他材料槽位选择");
+            }
+            im.setLore(lores);
+            item.setItemMeta(im);
+            inv.setItem(slot, item);
+            shown += 1;
+        }
+
+        ItemStack prev = new ItemStack(Material.ARROW, 1);
+        ItemMeta previm = prev.getItemMeta();
+        previm.setDisplayName("§e上一箱 §7(" + (this.pcBox + 1) + " / " + boxes + ")");
+        prev.setItemMeta(previm);
+        inv.setItem(45, prev);
+
+        ItemStack boxInfo = new ItemStack(Material.CHEST, 1);
+        ItemMeta boxim = boxInfo.getItemMeta();
+        boxim.setDisplayName("§b箱子 §f" + (this.pcBox + 1) + " §7/ §f" + boxes);
+        List<String> boxLores = new ArrayList<String>();
+        boxLores.add("§7本箱精灵: §f" + total + " §7只");
+        if (this.pcStarFilter > 0) {
+            boxLores.add("§7当前筛选: §f" + this.pcStarFilter + " 星 §7(显示 §f" + shown + " §7只)");
+        } else {
+            boxLores.add("§7当前筛选: §f全部");
+        }
+        boxim.setLore(boxLores);
+        boxInfo.setItemMeta(boxim);
+        inv.setItem(46, boxInfo);
+
+        ItemStack filter = new ItemStack(Material.HOPPER, 1);
+        ItemMeta filterim = filter.getItemMeta();
+        filterim.setDisplayName("§e星级筛选: §f" + (this.pcStarFilter == 0 ? "全部" : this.pcStarFilter + " 星"));
+        List<String> filterLores = new ArrayList<String>();
+        filterLores.add("§7点击切换：全部 → 1 星 → … → 7 星 → 全部");
+        filterim.setLore(filterLores);
+        filter.setItemMeta(filterim);
+        inv.setItem(47, filter);
+
+        ItemStack back = new ItemStack(Material.BARRIER, 1);
+        ItemMeta backim = back.getItemMeta();
+        backim.setDisplayName("§c返回合成界面");
+        back.setItemMeta(backim);
+        inv.setItem(49, back);
+
+        ItemStack next = new ItemStack(Material.ARROW, 1);
+        ItemMeta nextim = next.getItemMeta();
+        nextim.setDisplayName("§e下一箱 §7(" + (this.pcBox + 1) + " / " + boxes + ")");
+        next.setItemMeta(nextim);
+        inv.setItem(53, next);
+
+        p.closeInventory();
+        // ⚠️ select 必须在 closeInventory() **之后**置位。
+        // closeInventory 会**同步**派发 InventoryCloseEvent，而那个处理器会把 select 清成 false
+        // （它把「关闭一个选料类界面」理解为「玩家放弃了选料」）。先置位再关等于白置 ——
+        // 后果是盒子界面本身关闭时 isSelect 已经是 false，于是没人负责把玩家送回主界面，
+        // 玩家会停在一个空屏（标题变成默认的 container.crafting）上。
+        // 2026-10-17 的真机回归就是这么红的（R4 起整片失败，25 条里有 8 条是它引起的）。
+        this.select = true;
         p.openInventory(inv);
     }
 
@@ -502,11 +739,12 @@ public class PlayerData {
         // 新增（可配）：材料数量可配为 1 或 2。为 1 时只看 slot1，slot2 视为不存在 ——
         // 这样「星级必须相同」这条判定自动成立，不需要额外分支。
         int need = PokeUtils.getInstance().getMaterialCount();
-        if (this.slot1 > -1 && (need < 2 || this.slot2 > -1)) {
-            PlayerPartyStorage pps = Pixelmon.storageManager.getParty(p.getUniqueId());
+        // 新增（A1）：判「选没选」用引用是否为空，不能用队伍下标 —— 电脑来源的引用
+        // 投影出来的队伍下标是 -1，与「未选」撞车。
+        if (this.material1 != null && (need < 2 || this.material2 != null)) {
             PokeStarAPI psa = new PokeStarAPI();
-            Pokemon pm1 = pps.get(this.slot1);
-            Pokemon pm2 = need < 2 ? pm1 : pps.get(this.slot2);
+            Pokemon pm1 = MaterialAccess.resolve(p, this.material1);
+            Pokemon pm2 = need < 2 ? pm1 : MaterialAccess.resolve(p, this.material2);
             // 修复（新增防护）：槽位上的精灵可能已经被移走 —— checkJL 由 openGui 调用，
             // 而界面在「选完精灵/粘剂后自动重开」时也会再走一遍。原实现直接 pmX.getSpecies()
             // 解引用，会抛 NullPointerException，把「打开合成界面」这个动作整个炸掉。

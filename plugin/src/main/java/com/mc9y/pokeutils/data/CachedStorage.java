@@ -97,9 +97,17 @@ public class CachedStorage implements Storage {
         final UUID uuid;
         String name;
         int failStreak;
+        /** 新增（A2）：这些连败是在哪个原料星级档上积累的（0 = 未知）。 */
+        int failStar;
         final Map<String, Integer> stickers = new HashMap<String, Integer>();
         final Set<String> dirtyStickers = new HashSet<String>();
-        boolean dirtyStreak;
+        /**
+         * 保底进度（连败次数 + 所属档位）有未落盘的改动。
+         *
+         * <p>两个字段合成一个脏标记：它们在业务上永远一起变（失败时一起前进、
+         * 成功时一起清零），分开标只会让写回做两次数据库往返。</p>
+         */
+        boolean dirtyFailProgress;
         boolean dirtyName;
         /** 玩家已退服，落盘完成后可以驱逐。 */
         boolean evictPending;
@@ -114,7 +122,7 @@ public class CachedStorage implements Storage {
         }
 
         boolean clean() {
-            return this.dirtyStickers.isEmpty() && !this.dirtyStreak && !this.dirtyName;
+            return this.dirtyStickers.isEmpty() && !this.dirtyFailProgress && !this.dirtyName;
         }
     }
 
@@ -259,6 +267,7 @@ public class CachedStorage implements Storage {
         try {
             entry.stickers.putAll(this.backend.getStickers(uuid));
             entry.failStreak = this.backend.getFailStreak(uuid);
+            entry.failStar = this.backend.getFailStar(uuid);
         } catch (RuntimeException ex) {
             this.logger.warning("读取玩家数据失败，本次以空数据开始: " + ex);
         }
@@ -358,6 +367,18 @@ public class CachedStorage implements Storage {
         }
     }
 
+    /** 新增（A2）：连败所属的原料星级档。 */
+    @Override
+    public int getFailStar(UUID uuid) {
+        Entry entry = this.cache.get(uuid);
+        if (entry == null) {
+            return this.backend.getFailStar(uuid);
+        }
+        synchronized (entry) {
+            return entry.failStar;
+        }
+    }
+
     // ------------------------------------------------------------------ 写
 
     @Override
@@ -388,7 +409,24 @@ public class CachedStorage implements Storage {
         synchronized (entry) {
             entry.name = safe;
             entry.failStreak = Math.max(value, 0);
-            entry.dirtyStreak = true;
+            entry.dirtyFailProgress = true;
+        }
+        this.schedule(entry);
+    }
+
+    /** 新增（A2）：写入连败所属的原料星级档。 */
+    @Override
+    public void setFailStar(UUID uuid, String name, int star) {
+        String safe = this.remember(uuid, name);
+        Entry entry = this.cache.get(uuid);
+        if (entry == null) {
+            this.backend.setFailStar(uuid, safe, star);
+            return;
+        }
+        synchronized (entry) {
+            entry.name = safe;
+            entry.failStar = Math.max(star, 0);
+            entry.dirtyFailProgress = true;
         }
         this.schedule(entry);
     }
@@ -517,8 +555,9 @@ public class CachedStorage implements Storage {
     private void flushEntry(Entry entry) {
         String name;
         Map<String, Integer> stickerSnapshot = null;
-        boolean writeStreak = false;
+        boolean writeFailProgress = false;
         int streak = 0;
+        int star = 0;
         boolean writeName = false;
         synchronized (entry) {
             name = entry.name;
@@ -530,16 +569,17 @@ public class CachedStorage implements Storage {
                 }
                 entry.dirtyStickers.clear();
             }
-            if (entry.dirtyStreak) {
+            if (entry.dirtyFailProgress) {
                 streak = entry.failStreak;
-                writeStreak = true;
-                entry.dirtyStreak = false;
+                star = entry.failStar;
+                writeFailProgress = true;
+                entry.dirtyFailProgress = false;
             }
             if (entry.dirtyName) {
                 writeName = true;
                 entry.dirtyName = false;
             }
-            if (stickerSnapshot == null && !writeStreak && !writeName) {
+            if (stickerSnapshot == null && !writeFailProgress && !writeName) {
                 this.maybeEvict(entry);
                 return;
             }
@@ -554,8 +594,12 @@ public class CachedStorage implements Storage {
                     this.backend.setSticker(entry.uuid, name, item.getKey(), item.getValue());
                 }
             }
-            if (writeStreak) {
+            if (writeFailProgress) {
+                // 新增（A2）：档位与次数一起写。它们是同一份进度的两个字段，
+                // 只写一个会让「次数记着、档位还是上一档」的状态被持久化，
+                // 而那个状态正好会让保底在错误的档位上触发或被错误地拦下。
                 this.backend.setFailStreak(entry.uuid, name, streak);
+                this.backend.setFailStar(entry.uuid, name, star);
             }
             synchronized (entry) {
                 entry.failures = 0;
@@ -568,10 +612,13 @@ public class CachedStorage implements Storage {
                 // 把刚摘走的脏标记放回去。放的是「键」而不是当时的「值」——
                 // 下一次重试会重新读一遍当前值，那才是最新值。写入用的是绝对值，
                 // 所以重放不会多扣一次资产。
+                //
+                // 保底进度（次数 + 档位）是一个标记管两个字段：失败时要整块回滚，
+                // 否则会出现「次数写成功、档位没写成功」的错位。
                 if (stickerSnapshot != null) {
                     entry.dirtyStickers.addAll(stickerSnapshot.keySet());
                 }
-                entry.dirtyStreak |= writeStreak;
+                entry.dirtyFailProgress |= writeFailProgress;
                 entry.dirtyName |= writeName;
                 entry.failures++;
                 failures = entry.failures;

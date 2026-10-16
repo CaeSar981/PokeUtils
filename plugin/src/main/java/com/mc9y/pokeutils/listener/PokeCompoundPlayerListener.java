@@ -8,6 +8,8 @@ import com.mc9y.pokestar.PokeStarAPI;
 import com.mc9y.pokeutils.PokeUtils;
 import com.mc9y.pokeutils.data.CachedStorage;
 import com.mc9y.pokeutils.data.LegacyDataMigration;
+import com.mc9y.pokeutils.data.MaterialAccess;
+import com.mc9y.pokeutils.data.MaterialRef;
 import com.mc9y.pokeutils.data.PlayerData;
 import com.mc9y.pokeutils.data.Storage;
 import com.mc9y.pokeutils.data.StickerType;
@@ -15,7 +17,6 @@ import com.mc9y.pokeutils.data.YSData;
 import com.pixelmonmod.pixelmon.Pixelmon;
 import com.pixelmonmod.pixelmon.api.pokemon.Pokemon;
 import com.pixelmonmod.pixelmon.enums.EnumSpecies;
-import com.pixelmonmod.pixelmon.storage.PlayerPartyStorage;
 import java.util.List;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
@@ -114,41 +115,41 @@ public class PokeCompoundPlayerListener implements Listener {
                                 // 新增（可配）：材料数量与「是否必须放粘剂」都由 config.yml 决定。
                                 int need = PokeUtils.getInstance().getMaterialCount();
                                 boolean stickerRequired = PokeUtils.getInstance().isStickerRequired();
-                                boolean hasMaterials = pd.getSlot1() > -1 && (need < 2 || pd.getSlot2() > -1);
+                                // 新增（A1）：判「材料选没选」用引用是否为空 —— 电脑来源的引用
+                                // 投影出来的队伍下标是 -1，与「未选」撞车。
+                                boolean hasMaterials = pd.getMaterial1() != null && (need < 2 || pd.getMaterial2() != null);
                                 boolean hasSticker = !stickerRequired || pd.getYS() != null;
 
                                 if (hasMaterials && hasSticker) {
                                     PokeStarAPI psa = new PokeStarAPI();
-                                    PlayerPartyStorage pps = Pixelmon.storageManager.getParty(p.getUniqueId());
-                                    int amount = 0;
-
-                                    for (int i = 0; i < 6; i++) {
-                                        Pokemon pokemon = pps.get(i);
-                                        if (pokemon != null) {
-                                            if (pokemon.isEgg()) {
-                                                continue;
-                                            }
-                                            amount++;
-                                        }
-                                    }
+                                    // 新增（A1）：「队伍至少剩一只」只统计**队伍来源**的材料。
+                                    // 从电脑盒子取料不会让队伍变少 —— 若仍按 need 去扣，
+                                    // 「材料全在盒子里、队伍只有一只」这种完全正常的用法会被误拒。
+                                    int amount = MaterialAccess.partyCount(p);
+                                    int partyConsumed = countPartyMaterials(pd, need);
 
                                     // 修复（可配）：队伍下限跟着材料数量走。原实现写死「最少 3 只」，
                                     // 对应的是「消耗 2 只、至少要剩 1 只」；材料数配成 1 时下限也应
-                                    // 变成 2。need = 2 时文案与原来逐字一致。
-                                    if (amount <= need) {
-                                        p.sendMessage("§3精灵合成 §f|| §c背包最少需要装备"
-                                                + PokeUtils.numeral(need + 1) + "只精灵!");
+                                    // 变成 2。全部材料都来自队伍时，文案与原来逐字一致。
+                                    // 只有真的会动到队伍时才检查 —— 一只队伍来源的材料都没用到，
+                                    // 队伍根本不会变少，这条约束无从谈起（材料全在盒子里、
+                                    // 队伍空着，是完全合法的用法）。
+                                    if (partyConsumed > 0 && amount - partyConsumed < 1) {
+                                        p.sendMessage("§3精灵合成 §f|| §c" + (partyConsumed == need
+                                                ? "背包最少需要装备" + PokeUtils.numeral(need + 1) + "只精灵!"
+                                                : "队伍里的精灵不足以支撑本次合成, 至少要保留一只!"));
                                     } else {
                                         // 修复（新增防护）：先把两只精灵取出来判空。
                                         // 界面开着的时候，所选槽位上的精灵可能已经被移走 —— 其他插件/指令操作了队伍，
                                         // 或者玩家连点两次「确认合成」而第一次已经删掉了这两只。原实现直接
                                         // pps.get(slot).getSpecies() 解引用，这里会抛 NullPointerException。
-                                        // 材料数为 1 时 slot2 恒为 -1，不能拿它去 pps.get()。
-                                        Pokemon pokemon1 = pps.get(pd.getSlot1());
-                                        Pokemon pokemon2 = need < 2 ? pokemon1 : pps.get(pd.getSlot2());
+                                        // 材料数为 1 时 material2 为 null，不能拿它去 resolve。
+                                        // 新增（A1）：这两只也可能在电脑盒子里，解析统一走 MaterialAccess。
+                                        Pokemon pokemon1 = MaterialAccess.resolve(p, pd.getMaterial1());
+                                        Pokemon pokemon2 = need < 2 ? pokemon1 : MaterialAccess.resolve(p, pd.getMaterial2());
                                         if (pokemon1 == null || pokemon2 == null) {
-                                            pd.setSlot1(-1);
-                                            pd.setSlot2(-1);
+                                            pd.setMaterial1(null);
+                                            pd.setMaterial2(null);
                                             p.sendMessage("§3精灵合成 §f|| §c所选槽位上的精灵已不存在, 请重新选择!");
                                             p.closeInventory();
                                             return;
@@ -276,10 +277,21 @@ public class PokeCompoundPlayerListener implements Listener {
                                                     // 新增：连续失败保底。计数写在该玩家自己的数据文件里（YSData），
                                                     // 换服 / 重启都不会丢。达到阈值时本次直接判成功；成功（无论是否保底）
                                                     // 后清零，失败则 +1。阈值与开关都取自 config.yml。
+                                                    //
+                                                    // 新增（A2 保底分档）：计数带「档位」。原实现只有一个全局计数，
+                                                    // 于是可以在一星档垫刀把计数推到阈值、再在六星档消费保底 ——
+                                                    // 保底被用在了它从未积累过的档位上，而这正是低星材料便宜的意义所在。
+                                                    // 现在：换档即重新计数；阈值也可以按档位单独配。
+                                                    //
+                                                    // 档位 0 表示「不知道」（升级前那一列还不存在，或计数由测试/运维
+                                                    // 直接写入），此时按「任意档位都算」处理 —— 否则升级会把老玩家
+                                                    // 攒了一半的保底进度一笔勾销。
                                                     int streak = ysd.getFailStreak();
-                                                    int threshold = PokeUtils.getInstance().getPityThreshold();
+                                                    int failStar = ysd.getFailStar();
+                                                    int threshold = PokeUtils.getInstance().getPityThreshold(star1);
+                                                    boolean starMatched = failStar == 0 || failStar == star1;
                                                     boolean pity = PokeUtils.getInstance().isPityEnabled()
-                                                            && threshold > 0 && streak >= threshold;
+                                                            && threshold > 0 && starMatched && streak >= threshold;
                                                     int refund = PokeUtils.getInstance().getRefundPercent();
 
                                                     int randomJL = (int) (1.0 + Math.random() * 100.0);
@@ -290,12 +302,14 @@ public class PokeCompoundPlayerListener implements Listener {
                                                     }
                                                     if (pity || randomJL <= pd.getSumJL()) {
                                                         ysd.setFailStreak(0);
+                                                        // 新增（A2）：档位一起清零 —— 下次失败时会重新记上当时的档位。
+                                                        ysd.setFailStar(0);
                                                         // 合成结束，二次确认状态作废 —— 下次合成要重新确认
                                                         pd.setConfirmed(false);
-                                                        pps.set(pd.getSlot1(), null);
+                                                        MaterialAccess.consume(p, pd.getMaterial1());
                                                         // 新增（可配）：材料数为 1 时只有 slot1 有东西可清。
                                                         if (need >= 2) {
-                                                            pps.set(pd.getSlot2(), null);
+                                                            MaterialAccess.consume(p, pd.getMaterial2());
                                                         }
                                                         // starPMs 已在扣费前的空池预检处取好（非空），此处直接复用。
                                                         String rpmn = ((String) starPMs.get((int) (Math.random() * (double) starPMs.size()))).replace("Ho-Oh", "HoOh");
@@ -316,7 +330,11 @@ public class PokeCompoundPlayerListener implements Listener {
                                                         // 修复：播报阈值与文案原来写死（>=6 星 + 固定文案），现由配置提供。
                                                         broadcastCompound(p, star1 + 1, pokemon, psa);
                                                     } else {
-                                                        ysd.setFailStreak(streak + 1);
+                                                        // 新增（A2）：换档就重新计数。原来的那些连败属于别的档位，
+                                                        // 沿用它们等于让低星档「垫」出来的进度被高星档消费掉。
+                                                        int nextStreak = (failStar != 0 && failStar != star1) ? 1 : streak + 1;
+                                                        ysd.setFailStreak(nextStreak);
+                                                        ysd.setFailStar(star1);
                                                         pd.setConfirmed(false);
 
                                                         // 新增（经济）：失败补偿方式可配。
@@ -375,22 +393,22 @@ public class PokeCompoundPlayerListener implements Listener {
                                                             if (hasKeepOnePermission(p)) {
                                                                 int r = (int) (Math.random() * 2.0);
                                                                 if (r == 0) {
-                                                                    pps.set(pd.getSlot1(), null);
+                                                                    MaterialAccess.consume(p, pd.getMaterial1());
                                                                 } else if (need >= 2) {
-                                                                    pps.set(pd.getSlot2(), null);
+                                                                    MaterialAccess.consume(p, pd.getMaterial2());
                                                                 }
 
                                                                 p.sendMessage("§3精灵合成 §f|| §e来自众神的祝福, 保留住了一只精灵！");
                                                             } else {
-                                                                pps.set(pd.getSlot1(), null);
+                                                                MaterialAccess.consume(p, pd.getMaterial1());
                                                                 if (need >= 2) {
-                                                                    pps.set(pd.getSlot2(), null);
+                                                                    MaterialAccess.consume(p, pd.getMaterial2());
                                                                 }
                                                             }
                                                         } else {
-                                                            pps.set(pd.getSlot1(), null);
+                                                            MaterialAccess.consume(p, pd.getMaterial1());
                                                             if (need >= 2) {
-                                                                pps.set(pd.getSlot2(), null);
+                                                                MaterialAccess.consume(p, pd.getMaterial2());
                                                             }
                                                         }
 
@@ -405,10 +423,10 @@ public class PokeCompoundPlayerListener implements Listener {
                                                         // 保底是上一轮加的功能，但玩家要打开界面才看得到进度，
                                                         // 等于「机制存在、体感为零」。
                                                         PokeUtils.getInstance().playFeedback(p, "fail");
-                                                        if (PokeUtils.getInstance().isPityEnabled()
-                                                                && PokeUtils.getInstance().getPityThreshold() > 0) {
-                                                            PokeUtils.getInstance().notifyPity(p, streak + 1,
-                                                                    PokeUtils.getInstance().getPityThreshold());
+                                                        // 新增（A2）：进度与阈值都取当前档位的 ——
+                                                        // 换成 nextStreak 是因为刚判定的那一次已经计进去了（换档时它回到 1）。
+                                                        if (PokeUtils.getInstance().isPityEnabled() && threshold > 0) {
+                                                            PokeUtils.getInstance().notifyPity(p, nextStreak, threshold);
                                                         }
 
                                                         // 新增：合成流水日志
@@ -459,6 +477,17 @@ public class PokeCompoundPlayerListener implements Listener {
                         return;
                     }
 
+                    // 新增（A1）：从选料界面进电脑盒子。
+                    // 单独判在这个 switch 之前 —— 它不是「选第几只」，而是一次界面跳转，
+                    // 混进下面那个 pokeSlot 赋值链里会让「pokeSlot > -1」的含义变模糊。
+                    // 开关关闭时这里不响应，点击会落到灰玻璃上（没有任何反应，也不会误开界面）。
+                    if (e.getSlot() == PlayerData.PC_ENTRY_SLOT
+                            && PokeUtils.getInstance().isPcSelectionEnabled()) {
+                        PokeUtils.getInstance().playFeedback(p, "select");
+                        pd.beginPcSelect(p, slot);
+                        return;
+                    }
+
                     switch (e.getSlot()) {
                         case 11:
                             pokeSlot = 0;
@@ -480,9 +509,11 @@ public class PokeCompoundPlayerListener implements Listener {
                     }
 
                     if (pokeSlot > -1) {
-                        PlayerPartyStorage pps = Pixelmon.storageManager.getParty(p.getUniqueId());
-                        int amount = pps.getTeam().size();
-                        if (pd.getSlot1() == pokeSlot || pd.getSlot2() == pokeSlot) {
+                        // 新增（A1）：材料改成引用对象。重复判定用 MaterialRef#same ——
+                        // 原来的 `pd.getSlot1() == pokeSlot` 只能比队伍下标，
+                        // 而「队伍 3」与「箱子 2 的第 3 格」在旧写法下会被判成同一只。
+                        MaterialRef ref = MaterialRef.ofParty(pokeSlot);
+                        if (MaterialRef.same(ref, pd.getMaterial1()) || MaterialRef.same(ref, pd.getMaterial2())) {
                             p.sendMessage("§3精灵合成 §f|| §c该精灵已在其他槽位选择！");
                             return;
                         }
@@ -491,13 +522,13 @@ public class PokeCompoundPlayerListener implements Listener {
                         // 「队伍恰好两只、先选第 2 格再选第 1 格」这种顺序下会少减一只，
                         // 让预览算出「还剩 2 只」而实际只剩 1 只。同一件事文件里有 > -1 / == / > 0
                         // 三种写法，以 >= 0 为准（唯一正确的那个）。
-                        amount += pd.getSlot1() >= 0 ? -1 : 0;
-                        amount += pd.getSlot2() >= 0 ? -1 : 0;
-                        if (amount > 1) {
+                        // 新增（A1）：改由 partyKeepsOne 统一判定 —— 只有队伍来源的材料会让队伍变少。
+                        // newFromParty = true，即这次选中的正好是一只队伍里的精灵。
+                        if (partyKeepsOne(p, pd, true)) {
                             if (slot == 1) {
-                                pd.setSlot1(pokeSlot);
+                                pd.setMaterial1(ref);
                             } else {
-                                pd.setSlot2(pokeSlot);
+                                pd.setMaterial2(ref);
                             }
 
                             PokeUtils.getInstance().playFeedback(p, "select");
@@ -505,6 +536,40 @@ public class PokeCompoundPlayerListener implements Listener {
                         } else {
                             p.sendMessage("§3精灵合成 §f|| §c最少必须有一只精灵！");
                         }
+                    }
+                }
+            }
+        } else if (e.getInventory().getTitle().startsWith(PlayerData.GUI_PC_SELECT)) {
+            // ============================================================ 新增（A1）：电脑盒子选料
+            e.setCancelled(true);
+            if (e.getClickedInventory() != null
+                    && e.getClickedInventory().getTitle().startsWith(PlayerData.GUI_PC_SELECT)) {
+                Player p = (Player) e.getWhoClicked();
+                if (PokeUtils.getInstance().playerdatas.containsKey(p.getName())) {
+                    PlayerData pd = PokeUtils.getInstance().playerdatas.get(p.getName());
+                    int boxes = MaterialAccess.boxCount(p);
+                    if (e.getSlot() == 45) {
+                        // 上一箱。首箱再往前翻要绕到最后一箱 —— 翻到底就没反应会让人以为界面卡了。
+                        PokeUtils.getInstance().playFeedback(p, "select");
+                        pd.setPcBox(boxes <= 0 ? 0 : (pd.getPcBox() - 1 + boxes) % boxes);
+                        pd.openPcSelectGui(p);
+                    } else if (e.getSlot() == 53) {
+                        PokeUtils.getInstance().playFeedback(p, "select");
+                        pd.setPcBox(boxes <= 0 ? 0 : (pd.getPcBox() + 1) % boxes);
+                        pd.openPcSelectGui(p);
+                    } else if (e.getSlot() == 47) {
+                        // 星级筛选：全部 -> 1 -> 2 -> … -> 7 -> 全部。
+                        // 用「循环」而不是下拉，是因为 1.12.2 的物品栏界面没有下拉控件，
+                        // 而多开一个筛选界面又得再记一套「从哪来的」状态。
+                        PokeUtils.getInstance().playFeedback(p, "select");
+                        int next = pd.getPcStarFilter() + 1;
+                        pd.setPcStarFilter(next > 7 ? 0 : next);
+                        pd.openPcSelectGui(p);
+                    } else if (e.getSlot() == 49) {
+                        PokeUtils.getInstance().playFeedback(p, "select");
+                        pd.openGui(p);
+                    } else if (e.getSlot() >= 0 && e.getSlot() < PlayerData.PC_CONTENT_SLOTS) {
+                        pickPcMaterial(p, pd, e.getSlot());
                     }
                 }
             }
@@ -669,6 +734,7 @@ public class PokeCompoundPlayerListener implements Listener {
                 }.runTaskLater(PokeUtils.getInstance(), 1L);
             } else if ((e.getInventory().getTitle().startsWith("§8请选择要合成的精灵: ")
                     || e.getInventory().getTitle().equals("§8请选择要使用的粘剂")
+                    || e.getInventory().getTitle().startsWith(PlayerData.GUI_PC_SELECT)
                     || e.getInventory().getTitle().startsWith("§8可能产出的精灵: ")) && isSelect) {
                 PokeUtils.getInstance().playerdatas.get(p.getName()).setSelect(false);
                 new BukkitRunnable() {
@@ -679,6 +745,14 @@ public class PokeCompoundPlayerListener implements Listener {
                         // get 返回 null 时抛空指针，而它发生在调度线程里，控制台只留一行栈。
                         PlayerData pd = PokeUtils.getInstance().playerdatas.get(p.getName());
                         if (pd == null || !p.isOnline()) {
+                            return;
+                        }
+                        // 修复（第七轮 A1 发现）：这一条以前无条件把人拽回主界面，
+                        // 于是「从选料界面点进电脑盒子」会在 2 tick 后被主界面顶掉 ——
+                        // 玩家看到的是一进去就弹回，像是那个按钮没生效。
+                        // 判据与主界面那条分支一致：只要玩家此刻仍开着本插件的某个界面，
+                        // 就说明这是一次**界面切换**而不是放弃，不该替他决定去哪。
+                        if (isPokeUtilsGui(p)) {
                             return;
                         }
                         pd.openGui(p);
@@ -704,6 +778,7 @@ public class PokeCompoundPlayerListener implements Listener {
         return title.equals("§8精灵合成")
                 || title.equals("§8请选择要使用的粘剂")
                 || title.startsWith("§8请选择要合成的精灵: ")
+                || title.startsWith(PlayerData.GUI_PC_SELECT)
                 || title.startsWith("§8可能产出的精灵: ");
     }
 
@@ -715,6 +790,74 @@ public class PokeCompoundPlayerListener implements Listener {
             }
         }
         return false;
+    }
+
+    /**
+     * 新增（A1）：把电脑盒子里的一只精灵选为合成材料。
+     *
+     * <p>三道判定与队伍那条路径<b>共用同一套规则</b>（重复、队伍保底），
+     * 差别只在「这只精灵在哪」以及「消耗它会不会让队伍变少」。</p>
+     */
+    private static void pickPcMaterial(Player p, PlayerData pd, int pcSlot) {
+        MaterialRef ref = MaterialRef.ofPc(pd.getPcBox(), pcSlot);
+        Pokemon pokemon = MaterialAccess.resolve(p, ref);
+        if (pokemon == null) {
+            // 点到了空格子。界面上本该只有灰玻璃或精灵，走到这里说明箱子内容在
+            // 界面开着的时候变了 —— 静默忽略，不提示也不改任何东西。
+            return;
+        }
+        if (MaterialRef.same(ref, pd.getMaterial1()) || MaterialRef.same(ref, pd.getMaterial2())) {
+            p.sendMessage("§3精灵合成 §f|| §c该精灵已在其他槽位选择！");
+            return;
+        }
+        // newFromParty = false：从盒子取料不会让队伍变少。
+        if (!partyKeepsOne(p, pd, false)) {
+            p.sendMessage("§3精灵合成 §f|| §c最少必须有一只精灵！");
+            return;
+        }
+        if (pd.getPcTargetSlot() == 2) {
+            pd.setMaterial2(ref);
+        } else {
+            pd.setMaterial1(ref);
+        }
+        PokeUtils.getInstance().playFeedback(p, "select");
+        p.closeInventory();
+    }
+
+    /**
+     * 已选材料里有多少只来自队伍。
+     *
+     * <p>把原实现「消耗几只、队伍至少剩一只」的判定推广到两种材料来源时，
+     * 「队伍会变少多少」只取决于队伍来源的那几只 —— 从盒子取料不动队伍。</p>
+     */
+    private static int countPartyMaterials(PlayerData pd, int need) {
+        int count = 0;
+        if (pd.getMaterial1() != null && pd.getMaterial1().isParty()) {
+            count += 1;
+        }
+        if (need >= 2 && pd.getMaterial2() != null && pd.getMaterial2().isParty()) {
+            count += 1;
+        }
+        return count;
+    }
+
+    /**
+     * 「选完这一只之后，队伍里至少还要剩一只」。
+     *
+     * <p>沿用了原实现的算法（队伍占格数 − 已选中的队伍来源材料数 − 本次这一只），
+     * 只把「已选中的材料数」换成「已选中的<b>队伍来源</b>材料数」。
+     * 一只队伍来源的材料都没用到时直接放行 —— 那种情况下队伍根本不会变少。</p>
+     *
+     * <p>⚠️ 刻意保留了原实现的一个小毛病：它把<b>两个</b>已选槽位都算作扣减，
+     * 包括正在被替换的那一个。所以「两个槽位都选满之后再改选槽位 1」会被拒
+     * （队伍恰好 3 只时：3 − 1 − 1 = 1，不大于 1）。修它会悄悄放宽一条已有边界，
+     * 而这不属于本轮要动的东西 —— 真要修应该单独一轮并配专门的用例。</p>
+     */
+    private static boolean partyKeepsOne(Player p, PlayerData pd, boolean newFromParty) {
+        int team = MaterialAccess.partySize(p);
+        int consumed = countPartyMaterials(pd, PokeUtils.getInstance().getMaterialCount())
+                + (newFromParty ? 1 : 0);
+        return consumed == 0 || team - consumed >= 1;
     }
 
     /**

@@ -438,9 +438,37 @@ public class PokeUtils extends JavaPlugin {
         return this.getConfig().getBoolean("Compound.pity.enabled", true);
     }
 
-    /** 连续失败多少次后下一次必定成功（&lt;= 0 视为不启用）。 */
+    /** 连续失败多少次后下一次必定成功（&lt;= 0 视为不启用）。这是所有档位共用的默认值。 */
     public int getPityThreshold() {
         return this.getConfig().getInt("Compound.pity.threshold", DEFAULT_PITY_THRESHOLD);
+    }
+
+    /**
+     * 某个原料星级档的保底阈值（新增，A2 保底分档）。
+     *
+     * <p>{@code Compound.pity.threshold-by-star} 可以给个别档位单独定阈值，
+     * 没配的档位回退到 {@link #getPityThreshold()} 那个单值。
+     * {@code star <= 0} 表示「还不知道是哪个档位」（界面刚打开、材料还没选齐），
+     * 此时一律用单值。</p>
+     *
+     * <p>⚠️ 判定「这一段配没配」必须<b>同时判 null 与空段</b>：Bukkit 的
+     * {@code getConfigurationSection} 在「本段没这个键、但 jar 内置 config.yml 有」时
+     * 会<b>凭空造一个空段</b>返回（配置坑 ②）。出厂 config.yml 里写的是
+     * {@code threshold-by-star: {}}，所以正常情况下拿到的是「真实的空段」，
+     * 这条兜底是为了「换 jar 但沿用旧 config.yml」那种场景。</p>
+     */
+    public int getPityThreshold(int star) {
+        int fallback = this.getPityThreshold();
+        if (star <= 0) {
+            return fallback;
+        }
+        ConfigurationSection section = this.getConfig()
+                .getConfigurationSection("Compound.pity.threshold-by-star");
+        if (section == null || section.getKeys(false).isEmpty()) {
+            return fallback;
+        }
+        // 逐键取值：段本身非空，所以这里不会踩「凭空造空段」那个坑。
+        return section.getInt(String.valueOf(star), fallback);
     }
 
     // ================================================================ 其它可配置行为
@@ -602,6 +630,18 @@ public class PokeUtils extends JavaPlugin {
     public int getFailStreak(Player p) {
         YSData data = this.ysdatas.get(p.getName());
         return data == null ? 0 : data.getFailStreak();
+    }
+
+    /**
+     * 新增（A2）：玩家的保底进度是在哪个原料星级档上积累的（0 = 未知 / 不限定档位）。
+     *
+     * <p>0 不是「没档位」的意思，而是<b>不知道</b>：它来自旧数据（升级前那一列还不存在）
+     * 或测试替身直接写入的计数。判定时把 0 当作「任意档位都算」，这样升级不会把
+     * 老玩家攒了一半的保底进度一笔勾销。</p>
+     */
+    public int getFailStar(Player p) {
+        YSData data = this.ysdatas.get(p.getName());
+        return data == null ? 0 : data.getFailStar();
     }
 
     /**
@@ -864,6 +904,20 @@ public class PokeUtils extends JavaPlugin {
     /** 是否在合成界面提供「产出预览」。 */
     public boolean isPreviewEnabled() {
         return this.getConfig().getBoolean("Compound.preview.enabled", true);
+    }
+
+    // ================================================================ 电脑盒子选料
+
+    /**
+     * 是否允许从电脑盒子取合成材料（{@code Compound.pc.enabled}）。
+     *
+     * <p><b>注意这是个会改变玩法的开关</b>：关掉之后，材料只能从队伍出，
+     * 于是「一次能合几只」被 6 格队伍天然限制住 —— 那本身就是一道节奏阀。
+     * 默认开，是因为开着才符合「把收藏品拿出来升星」的直觉；
+     * 想按原来的节奏走就把它关掉。</p>
+     */
+    public boolean isPcSelectionEnabled() {
+        return this.getConfig().getBoolean("Compound.pc.enabled", true);
     }
 
     /** 产出预览每页显示多少项。 */
@@ -1349,6 +1403,16 @@ public class PokeUtils extends JavaPlugin {
     }
 
     /**
+     * 保底进度「积累档位」的展示文案。
+     *
+     * <p>0 显示成「不限」而不是「0 星」—— 它的含义是<b>不知道</b>
+     * （旧数据，或计数被测试/运维直接写入），判定时会当作「任意档位都算」。</p>
+     */
+    public static String pityStarText(int star) {
+        return star <= 0 ? "不限" : star + " 星";
+    }
+
+    /**
      * {@code /pu history [玩家] [条数]}：列出某个玩家最近的合成记录。
      *
      * <p>没有这个命令时，玩家想知道「我上一次到底合成了没」只能找管理翻服务器日志。
@@ -1510,11 +1574,16 @@ public class PokeUtils extends JavaPlugin {
         if (pd == null) {
             sender.sendMessage("§7 合成会话: §7（当前没有打开合成界面）");
         } else {
-            sender.sendMessage("§7 会话: 槽位1=§f" + pd.getSlot1() + " §7槽位2=§f" + pd.getSlot2()
+            sender.sendMessage("§7 会话: 槽位1=§f" + pd.describeMaterial1() + " §7槽位2=§f" + pd.describeMaterial2()
                     + " §7粘剂=§f" + (pd.getYS() == null ? "无" : pd.getYS())
                     + " §7材料星级=§f" + pd.getStar());
             sender.sendMessage("§7 成功率构成: 基础 §f" + pd.getJl() + "% §7+ 粘剂 §f" + pd.getYsjl()
                     + "% §7+ 权限组 §f" + pd.getVipBonus() + "% §7= §f" + pd.getSumJL() + "%");
+            // 新增（A2）：保底进度现在带档位 —— 排查「为什么没触发保底」时，
+            // 光看次数是没用的，还得知道这些次数是不是记在当前这一档上。
+            sender.sendMessage("§7 保底进度: §f" + this.getFailStreak(p)
+                    + " §7/ §f" + this.getPityThreshold(pd.getStar())
+                    + " §7· 积累档位=§f" + pityStarText(this.getFailStar(p)));
             sender.sendMessage("§7 二次确认=§f" + pd.isConfirmed() + " §7· 处理中=§f" + pd.isProcessing());
             if (pd.getStar() > 0) {
                 sender.sendMessage("§7 本次应扣金币: §f" + this.getEffectivePrice(p, pd.getStar())
@@ -1800,8 +1869,10 @@ public class PokeUtils extends JavaPlugin {
             sender.sendMessage("§7 （配置里没有定义任何粘剂）");
         }
         if (this.isPityEnabled() && this.getPityThreshold() > 0) {
+            int failStar = this.storage.getFailStar(uuid);
             sender.sendMessage("§7 - 连续失败: §f" + this.storage.getFailStreak(uuid)
-                    + " §7/ §f" + this.getPityThreshold());
+                    + " §7/ §f" + this.getPityThreshold(failStar)
+                    + " §7· 积累档位=§f" + pityStarText(failStar));
         }
         sender.sendMessage("§a==============================================");
     }

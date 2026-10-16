@@ -60,7 +60,22 @@ public class SqliteStorage implements Storage {
             + "  uuid        TEXT PRIMARY KEY,"
             + "  name        TEXT NOT NULL DEFAULT '',"
             + "  fail_streak INTEGER NOT NULL DEFAULT 0,"
+            + "  fail_star   INTEGER NOT NULL DEFAULT 0,"
             + "  updated_at  INTEGER NOT NULL DEFAULT 0)";
+
+    /**
+     * 建表语句跑完后补的「加列」语句，给已经存在的老库用。
+     *
+     * <p>新增（A2 保底分档）：{@code fail_star} 是后加的列，而
+     * {@code CREATE TABLE IF NOT EXISTS} 对已经存在的表<b>什么都不做</b> ——
+     * 老库不会自动长出这一列。所以建表之后还要挨个试一遍，缺哪列补哪列。</p>
+     *
+     * <p>重复执行时不报错才算幂等：SQLite 会回 {@code duplicate column name}，
+     * 那句专门吞掉；其它错误照旧留痕。</p>
+     */
+    private static final String[] DDL_PLAYER_ADD_COLUMNS = new String[]{
+        "ALTER TABLE pu_player ADD COLUMN fail_star INTEGER NOT NULL DEFAULT 0"
+    };
 
     private static final String DDL_STICKER =
             "CREATE TABLE IF NOT EXISTS pu_sticker ("
@@ -108,6 +123,34 @@ public class SqliteStorage implements Storage {
         try (Statement st = this.connection.createStatement()) {
             st.executeUpdate(DDL_PLAYER);
             st.executeUpdate(DDL_STICKER);
+        }
+        this.ensurePlayerColumns();
+    }
+
+    /**
+     * 给已存在的老库补上后加的列。
+     *
+     * <p>只在「列还不存在」时才真正生效 —— 靠让数据库自己报 {@code duplicate column name}
+     * 来检测，因为 SQLite 没有 {@code ADD COLUMN IF NOT EXISTS}。
+     * 刻意不在这里读 {@code PRAGMA table_info} 去判存在性：那要多一次往返，
+     * 而这里只跑一次、每次启动一次，吞掉一个已知错误更简单。</p>
+     */
+    private void ensurePlayerColumns() {
+        for (String ddl : DDL_PLAYER_ADD_COLUMNS) {
+            try (Statement st = this.connection.createStatement()) {
+                st.executeUpdate(ddl);
+                // Logger 是构造注入的，单参构造下为 null（见 log 方法），别直接解引用。
+                if (this.logger != null) {
+                    this.logger.info("[存储] 已为老库补上新增列: " + ddl);
+                }
+            } catch (SQLException ex) {
+                String message = ex.getMessage() == null ? "" : ex.getMessage().toLowerCase();
+                if (message.contains("duplicate column name")) {
+                    // 列已存在 —— 正常路径，安静跳过。
+                    continue;
+                }
+                this.log("补列(" + ddl + ")", ex);
+            }
         }
     }
 
@@ -297,12 +340,12 @@ public class SqliteStorage implements Storage {
             return out;
         }
         try (PreparedStatement ps = this.connection.prepareStatement(
-                "SELECT uuid, name, fail_streak FROM pu_player");
+                "SELECT uuid, name, fail_streak, fail_star FROM pu_player");
              ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
                 UUID uuid = SqliteStorage.parseUuid(rs.getString(1));
                 if (uuid != null) {
-                    out.add(new Storage.PlayerRecord(uuid, rs.getString(2), rs.getInt(3)));
+                    out.add(new Storage.PlayerRecord(uuid, rs.getString(2), rs.getInt(3), rs.getInt(4)));
                 }
             }
         } catch (SQLException ex) {
@@ -418,6 +461,41 @@ public class SqliteStorage implements Storage {
         } catch (SQLException ex) {
             this.log("setFailStreak", ex);
             throw new StorageException("SQLite 写入 setFailStreak(" + name + ") 失败: "
+                    + ex.getMessage(), ex);
+        }
+    }
+
+    // ---- 新增（A2 保底分档）：连败所属的原料星级档
+
+    public synchronized int getFailStar(UUID uuid) {
+        if (this.connection == null) {
+            return 0;
+        }
+        try (PreparedStatement ps = this.connection.prepareStatement(
+                "SELECT fail_star FROM pu_player WHERE uuid = ?")) {
+            ps.setString(1, uuid.toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        } catch (SQLException ex) {
+            this.log("getFailStar", ex);
+            return 0;
+        }
+    }
+
+    public synchronized void setFailStar(UUID uuid, String name, int star) {
+        if (this.connection == null) {
+            throw new StorageException("SQLite 连接不可用，无法写入保底档位(" + name + ")");
+        }
+        this.touchPlayer(uuid, name);
+        try (PreparedStatement ps = this.connection.prepareStatement(
+                "UPDATE pu_player SET fail_star = ? WHERE uuid = ?")) {
+            ps.setInt(1, Math.max(star, 0));
+            ps.setString(2, uuid.toString());
+            ps.executeUpdate();
+        } catch (SQLException ex) {
+            this.log("setFailStar", ex);
+            throw new StorageException("SQLite 写入 setFailStar(" + name + ") 失败: "
                     + ex.getMessage(), ex);
         }
     }

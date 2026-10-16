@@ -19,8 +19,8 @@ import java.util.UUID;
  * {@link #addSticker} 这个 default 方法提供，它在内存里做完读改写再落到绝对值接口上。</p>
  *
  * <p><b>实现要求</b>：{@link #getSticker} / {@link #setSticker} /
- * {@link #getFailStreak} / {@link #setFailStreak} 这四个方法必须能被多线程并发调用
- * （缓存层的写回线程与主线程可能同时进来）。</p>
+ * {@link #getFailStreak} / {@link #setFailStreak} / {@link #getFailStar} / {@link #setFailStar}
+ * 这几个方法必须能被多线程并发调用（缓存层的写回线程与主线程可能同时进来）。</p>
  */
 public interface Storage {
 
@@ -70,6 +70,18 @@ public interface Storage {
 
     /** 写入连续失败次数（负数会被夹到 0）。 */
     void setFailStreak(UUID uuid, String name, int value);
+
+    /**
+     * 这些连败是<b>在哪个原料星级档</b>上累积的（0 = 未知 / 不限定档位）。
+     *
+     * <p>新增（A2 保底分档）：原实现只有一个全局计数，于是可以在一星档「垫刀」
+     * 把计数推到阈值、再在六星档消费保底 —— 保底被用在了它从未积累过的档位上。
+     * 记下档位之后，换档即重新计数。</p>
+     */
+    int getFailStar(UUID uuid);
+
+    /** 写入连败所属的原料星级档（负数夹到 0）。 */
+    void setFailStar(UUID uuid, String name, int star);
 
     /**
      * 原子增减某种粘剂，结果夹在 {@code [0, +∞)}，返回变更后的数量。
@@ -137,11 +149,14 @@ public interface Storage {
         public final UUID uuid;
         public final String name;
         public final int failStreak;
+        /** 连败所属的原料星级档（0 = 未知 / 旧数据）。 */
+        public final int failStar;
 
-        public PlayerRecord(UUID uuid, String name, int failStreak) {
+        public PlayerRecord(UUID uuid, String name, int failStreak, int failStar) {
             this.uuid = uuid;
             this.name = name;
             this.failStreak = failStreak;
+            this.failStar = failStar;
         }
     }
 

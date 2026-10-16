@@ -85,4 +85,18 @@ public class YSData {
             storage.setFailStreak(this.uuid, this.name, value);
         }
     }
+
+    /** 新增（A2）：这些连败是在哪个原料星级档上积累的（0 = 未知 / 不限定档位）。 */
+    public int getFailStar() {
+        Storage storage = PokeUtils.getInstance().getStorage();
+        return storage == null ? 0 : storage.getFailStar(this.uuid);
+    }
+
+    /** 新增（A2）：写入连败所属的原料星级档。 */
+    public void setFailStar(int star) {
+        Storage storage = PokeUtils.getInstance().getStorage();
+        if (storage != null) {
+            storage.setFailStar(this.uuid, this.name, star);
+        }
+    }
 }

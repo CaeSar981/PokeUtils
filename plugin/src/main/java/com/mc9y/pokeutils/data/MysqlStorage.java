@@ -270,6 +270,7 @@ public class MysqlStorage implements Storage {
                 + " uuid VARCHAR(36) NOT NULL,"
                 + " name VARCHAR(32) NOT NULL DEFAULT '',"
                 + " fail_streak INT NOT NULL DEFAULT 0,"
+                + " fail_star INT NOT NULL DEFAULT 0,"
                 + " updated_at BIGINT NOT NULL DEFAULT 0,"
                 + " PRIMARY KEY (uuid),"
                 + " KEY " + this.table("name_idx") + " (name)"
@@ -294,9 +295,37 @@ public class MysqlStorage implements Storage {
         try (Statement st = connection.createStatement()) {
             st.executeUpdate(this.ddlPlayer());
             st.executeUpdate(this.ddlSticker());
+            this.ensurePlayerColumns(st);
             this.schemaReady = true;
         } finally {
             this.release(connection);
+        }
+    }
+
+    /**
+     * 给已存在的老库补上后加的列。
+     *
+     * <p>新增（A2 保底分档）：{@code fail_star} 是后加的列，而
+     * {@code CREATE TABLE IF NOT EXISTS} 对已经存在的表什么都不做 —— 老库不会自动长出它。
+     * MySQL 没有 {@code ADD COLUMN IF NOT EXISTS}，所以靠错误码检测：
+     * <b>1060 = Duplicate column name</b>，正常路径，安静跳过；其它错误码照旧往上抛
+     * （这里刻意不像 SQLite 那份一样只留痕 —— 建表阶段失败应该是硬失败，
+     * 否则后面所有查询都会以「表里没这列」的形式炸在更远的地方）。</p>
+     */
+    private void ensurePlayerColumns(Statement st) throws SQLException {
+        String[] ddl = new String[]{
+            "ALTER TABLE " + this.table("player") + " ADD COLUMN fail_star INT NOT NULL DEFAULT 0"
+        };
+        for (String sql : ddl) {
+            try {
+                st.executeUpdate(sql);
+                this.logger.info("[存储] 已为老库补上新增列: " + sql);
+            } catch (SQLException ex) {
+                if (ex.getErrorCode() == 1060) {
+                    continue;
+                }
+                throw ex;
+            }
         }
     }
 
@@ -441,12 +470,12 @@ public class MysqlStorage implements Storage {
         try {
             connection = this.borrow();
             try (PreparedStatement ps = connection.prepareStatement(
-                    "SELECT uuid, name, fail_streak FROM " + this.table("player"));
+                    "SELECT uuid, name, fail_streak, fail_star FROM " + this.table("player"));
                  ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     UUID uuid = MysqlStorage.parseUuid(rs.getString(1));
                     if (uuid != null) {
-                        out.add(new Storage.PlayerRecord(uuid, rs.getString(2), rs.getInt(3)));
+                        out.add(new Storage.PlayerRecord(uuid, rs.getString(2), rs.getInt(3), rs.getInt(4)));
                     }
                 }
             }
@@ -555,6 +584,49 @@ public class MysqlStorage implements Storage {
         } catch (SQLException ex) {
             this.logger.log(java.util.logging.Level.SEVERE, "MySQL 写入失败(setFailStreak): " + ex, ex);
             throw new StorageException("MySQL 写入 setFailStreak(" + name + ") 失败: "
+                    + ex.getMessage(), ex);
+        } finally {
+            this.release(connection);
+        }
+    }
+
+    // ---- 新增（A2 保底分档）：连败所属的原料星级档
+
+    @Override
+    public int getFailStar(UUID uuid) {
+        Connection connection = null;
+        try {
+            connection = this.borrow();
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "SELECT fail_star FROM " + this.table("player") + " WHERE uuid = ?")) {
+                ps.setString(1, uuid.toString());
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? rs.getInt(1) : 0;
+                }
+            }
+        } catch (SQLException ex) {
+            this.logger.log(java.util.logging.Level.SEVERE, "MySQL 查询失败(getFailStar): " + ex, ex);
+            return 0;
+        } finally {
+            this.release(connection);
+        }
+    }
+
+    @Override
+    public void setFailStar(UUID uuid, String name, int star) {
+        this.touchPlayer(uuid, name);
+        Connection connection = null;
+        try {
+            connection = this.borrow();
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "UPDATE " + this.table("player") + " SET fail_star = ? WHERE uuid = ?")) {
+                ps.setInt(1, Math.max(star, 0));
+                ps.setString(2, uuid.toString());
+                ps.executeUpdate();
+            }
+        } catch (SQLException ex) {
+            this.logger.log(java.util.logging.Level.SEVERE, "MySQL 写入失败(setFailStar): " + ex, ex);
+            throw new StorageException("MySQL 写入 setFailStar(" + name + ") 失败: "
                     + ex.getMessage(), ex);
         } finally {
             this.release(connection);

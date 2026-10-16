@@ -125,6 +125,10 @@ public final class StorageMigrator {
             for (Storage.PlayerRecord player : players) {
                 target.touchPlayer(player.uuid, player.name);
                 target.setFailStreak(player.uuid, player.name, player.failStreak);
+                // 新增（A2）：保底档位必须一起搬 —— 只搬次数不搬档位的话，
+                // 目标端会变成「次数记着、档位是 0」，而 0 被当作「不限定档位」，
+                // 于是刚迁完的服上保底可以在任意档位触发。这一条漏了就很难看出来。
+                target.setFailStar(player.uuid, player.name, player.failStar);
                 wrotePlayers++;
             }
 
