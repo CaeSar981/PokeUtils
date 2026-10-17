@@ -9,9 +9,11 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -287,6 +289,45 @@ public class MysqlStorage implements Storage {
                 + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci";
     }
 
+    /**
+     * 每日委托表。复合主键 {@code (uuid, day, slot)}，与 SQLite 那份同构。
+     *
+     * <p>{@code day} 在 MySQL 里是非保留关键字，按理可以直接当列名；这里仍加反引号，
+     * 因为它是 SQL 标准里的日期函数名，将来换驱动 / 开 {@code ANSI_QUOTES} 都不至于翻车。</p>
+     */
+    public String ddlQuest() {
+        return "CREATE TABLE IF NOT EXISTS " + this.table("quest") + " ("
+                + " uuid VARCHAR(36) NOT NULL,"
+                + " `day` VARCHAR(16) NOT NULL,"
+                + " slot INT NOT NULL,"
+                + " type VARCHAR(32) NOT NULL,"
+                + " target INT NOT NULL DEFAULT 1,"
+                + " star INT NOT NULL DEFAULT 0,"
+                + " progress INT NOT NULL DEFAULT 0,"
+                + " claimed TINYINT NOT NULL DEFAULT 0,"
+                + " PRIMARY KEY (uuid, `day`, slot)"
+                + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci";
+    }
+
+    /** 合成图鉴表。主键 {@code (uuid, species)}。 */
+    public String ddlDex() {
+        return "CREATE TABLE IF NOT EXISTS " + this.table("dex") + " ("
+                + " uuid VARCHAR(36) NOT NULL,"
+                + " species VARCHAR(64) NOT NULL,"
+                + " amount INT NOT NULL DEFAULT 0,"
+                + " PRIMARY KEY (uuid, species)"
+                + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci";
+    }
+
+    /** 已领取的图鉴里程碑表。主键 {@code (uuid, milestone)} —— 判重就压在这个主键上。 */
+    public String ddlDexReward() {
+        return "CREATE TABLE IF NOT EXISTS " + this.table("dex_reward") + " ("
+                + " uuid VARCHAR(36) NOT NULL,"
+                + " milestone INT NOT NULL,"
+                + " PRIMARY KEY (uuid, milestone)"
+                + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci";
+    }
+
     private void ensureSchema() throws SQLException {
         if (this.schemaReady) {
             return;
@@ -295,6 +336,9 @@ public class MysqlStorage implements Storage {
         try (Statement st = connection.createStatement()) {
             st.executeUpdate(this.ddlPlayer());
             st.executeUpdate(this.ddlSticker());
+            st.executeUpdate(this.ddlQuest());
+            st.executeUpdate(this.ddlDex());
+            st.executeUpdate(this.ddlDexReward());
             this.ensurePlayerColumns(st);
             this.schemaReady = true;
         } finally {
@@ -331,7 +375,8 @@ public class MysqlStorage implements Storage {
 
     /** 两条建表语句合在一起，供启动日志与「不连库也能验证方言」的测试使用。 */
     public String schemaText() {
-        return this.ddlPlayer() + " ; " + this.ddlSticker();
+        return this.ddlPlayer() + " ; " + this.ddlSticker() + " ; "
+                + this.ddlQuest() + " ; " + this.ddlDex() + " ; " + this.ddlDexReward();
     }
 
     /** 表名 = 配置的前缀 + 固定后缀。 */
@@ -628,6 +673,291 @@ public class MysqlStorage implements Storage {
             this.logger.log(java.util.logging.Level.SEVERE, "MySQL 写入失败(setFailStar): " + ex, ex);
             throw new StorageException("MySQL 写入 setFailStar(" + name + ") 失败: "
                     + ex.getMessage(), ex);
+        } finally {
+            this.release(connection);
+        }
+    }
+
+    // ------------------------------------------------------------------ 每日委托
+
+    /** 该玩家存在委托记录的日期（升序）。只给迁移用。 */
+    @Override
+    public Set<String> listQuestDays(UUID uuid) {
+        Set<String> out = new java.util.LinkedHashSet<String>();
+        Connection connection = null;
+        try {
+            connection = this.borrow();
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "SELECT DISTINCT `day` FROM " + this.table("quest")
+                    + " WHERE uuid = ? ORDER BY `day` ASC")) {
+                ps.setString(1, uuid.toString());
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        out.add(rs.getString(1));
+                    }
+                }
+            }
+        } catch (SQLException ex) {
+            this.logger.log(java.util.logging.Level.SEVERE,
+                    "MySQL 查询失败(listQuestDays): " + ex, ex);
+        } finally {
+            this.release(connection);
+        }
+        return out;
+    }
+
+    @Override
+    public List<QuestData> getQuests(UUID uuid, String day) {
+        List<QuestData> out = new ArrayList<QuestData>();
+        Connection connection = null;
+        try {
+            connection = this.borrow();
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "SELECT slot, type, target, star, progress, claimed FROM " + this.table("quest")
+                    + " WHERE uuid = ? AND `day` = ? ORDER BY slot ASC")) {
+                ps.setString(1, uuid.toString());
+                ps.setString(2, day);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        out.add(new QuestData(rs.getInt(1), rs.getString(2), rs.getInt(3),
+                                rs.getInt(4), rs.getInt(5), rs.getInt(6) != 0));
+                    }
+                }
+            }
+        } catch (SQLException ex) {
+            this.logger.log(java.util.logging.Level.SEVERE, "MySQL 查询失败(getQuests): " + ex, ex);
+        } finally {
+            this.release(connection);
+        }
+        return out;
+    }
+
+    @Override
+    public void insertQuests(UUID uuid, String name, String day, List<QuestData> quests) {
+        if (quests == null || quests.isEmpty()) {
+            return;
+        }
+        this.touchPlayer(uuid, name);
+        Connection connection = null;
+        try {
+            connection = this.borrow();
+            // INSERT IGNORE 对应 SQLite 的 INSERT OR IGNORE：主键冲突时静默跳过。
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "INSERT IGNORE INTO " + this.table("quest")
+                    + " (uuid, `day`, slot, type, target, star, progress, claimed)"
+                    + " VALUES (?, ?, ?, ?, ?, ?, 0, 0)")) {
+                for (QuestData quest : quests) {
+                    ps.setString(1, uuid.toString());
+                    ps.setString(2, day);
+                    ps.setInt(3, quest.getSlot());
+                    ps.setString(4, quest.getType());
+                    ps.setInt(5, quest.getTarget());
+                    ps.setInt(6, quest.getStar());
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+        } catch (SQLException ex) {
+            this.logger.log(java.util.logging.Level.SEVERE,
+                    "MySQL 写入失败(insertQuests): " + ex, ex);
+            throw new StorageException("MySQL 写入 insertQuests(" + name + "/" + day + ") 失败: "
+                    + ex.getMessage(), ex);
+        } finally {
+            this.release(connection);
+        }
+    }
+
+    @Override
+    public void setQuestProgress(UUID uuid, String day, int slot, int progress) {
+        Connection connection = null;
+        try {
+            connection = this.borrow();
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "UPDATE " + this.table("quest") + " SET progress = ?"
+                    + " WHERE uuid = ? AND `day` = ? AND slot = ?")) {
+                ps.setInt(1, Math.max(progress, 0));
+                ps.setString(2, uuid.toString());
+                ps.setString(3, day);
+                ps.setInt(4, slot);
+                ps.executeUpdate();
+            }
+        } catch (SQLException ex) {
+            this.logger.log(java.util.logging.Level.SEVERE,
+                    "MySQL 写入失败(setQuestProgress): " + ex, ex);
+            throw new StorageException("MySQL 写入 setQuestProgress(" + uuid + "/" + day
+                    + "/" + slot + ") 失败: " + ex.getMessage(), ex);
+        } finally {
+            this.release(connection);
+        }
+    }
+
+    @Override
+    public void setQuestClaimed(UUID uuid, String day, int slot) {
+        Connection connection = null;
+        try {
+            connection = this.borrow();
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "UPDATE " + this.table("quest") + " SET claimed = 1"
+                    + " WHERE uuid = ? AND `day` = ? AND slot = ?")) {
+                ps.setString(1, uuid.toString());
+                ps.setString(2, day);
+                ps.setInt(3, slot);
+                ps.executeUpdate();
+            }
+        } catch (SQLException ex) {
+            this.logger.log(java.util.logging.Level.SEVERE,
+                    "MySQL 写入失败(setQuestClaimed): " + ex, ex);
+            throw new StorageException("MySQL 写入 setQuestClaimed(" + uuid + "/" + day
+                    + "/" + slot + ") 失败: " + ex.getMessage(), ex);
+        } finally {
+            this.release(connection);
+        }
+    }
+
+    // ------------------------------------------------------------------ 合成图鉴
+
+    @Override
+    public int dexSpeciesCount(UUID uuid) {
+        return this.queryInt("dexSpeciesCount",
+                "SELECT COUNT(*) FROM " + this.table("dex") + " WHERE uuid = ?", uuid.toString());
+    }
+
+    @Override
+    public int dexTotalCount(UUID uuid) {
+        return this.queryInt("dexTotalCount",
+                "SELECT COALESCE(SUM(amount), 0) FROM " + this.table("dex") + " WHERE uuid = ?",
+                uuid.toString());
+    }
+
+    @Override
+    public Map<String, Integer> dexAll(UUID uuid) {
+        Map<String, Integer> out = new java.util.LinkedHashMap<String, Integer>();
+        Connection connection = null;
+        try {
+            connection = this.borrow();
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "SELECT species, amount FROM " + this.table("dex")
+                    + " WHERE uuid = ? ORDER BY amount DESC, species ASC")) {
+                ps.setString(1, uuid.toString());
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        out.put(rs.getString(1), rs.getInt(2));
+                    }
+                }
+            }
+        } catch (SQLException ex) {
+            this.logger.log(java.util.logging.Level.SEVERE, "MySQL 查询失败(dexAll): " + ex, ex);
+        } finally {
+            this.release(connection);
+        }
+        return out;
+    }
+
+    @Override
+    public int dexAdd(UUID uuid, String name, String species) {
+        if (species == null) {
+            return 0;
+        }
+        this.touchPlayer(uuid, name);
+        Connection connection = null;
+        try {
+            connection = this.borrow();
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "INSERT IGNORE INTO " + this.table("dex")
+                    + " (uuid, species, amount) VALUES (?, ?, 0)")) {
+                ps.setString(1, uuid.toString());
+                ps.setString(2, species);
+                ps.executeUpdate();
+            }
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "UPDATE " + this.table("dex") + " SET amount = amount + 1"
+                    + " WHERE uuid = ? AND species = ?")) {
+                ps.setString(1, uuid.toString());
+                ps.setString(2, species);
+                ps.executeUpdate();
+            }
+        } catch (SQLException ex) {
+            this.logger.log(java.util.logging.Level.SEVERE, "MySQL 写入失败(dexAdd): " + ex, ex);
+            throw new StorageException("MySQL 写入 dexAdd(" + name + "/" + species + ") 失败: "
+                    + ex.getMessage(), ex);
+        } finally {
+            this.release(connection);
+        }
+        return this.dexAmount(uuid, species);
+    }
+
+    @Override
+    public int dexAmount(UUID uuid, String species) {
+        if (species == null) {
+            return 0;
+        }
+        return this.queryInt("dexAmount",
+                "SELECT amount FROM " + this.table("dex") + " WHERE uuid = ? AND species = ?",
+                uuid.toString(), species);
+    }
+
+    @Override
+    public Set<Integer> dexClaimed(UUID uuid) {
+        Set<Integer> out = new HashSet<Integer>();
+        Connection connection = null;
+        try {
+            connection = this.borrow();
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "SELECT milestone FROM " + this.table("dex_reward") + " WHERE uuid = ?")) {
+                ps.setString(1, uuid.toString());
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        out.add(Integer.valueOf(rs.getInt(1)));
+                    }
+                }
+            }
+        } catch (SQLException ex) {
+            this.logger.log(java.util.logging.Level.SEVERE, "MySQL 查询失败(dexClaimed): " + ex, ex);
+        } finally {
+            this.release(connection);
+        }
+        return out;
+    }
+
+    @Override
+    public boolean dexClaim(UUID uuid, String name, int milestone) {
+        this.touchPlayer(uuid, name);
+        Connection connection = null;
+        try {
+            connection = this.borrow();
+            // 判重完全交给主键：影响行数 > 0 才是「本次真的领到了」。
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "INSERT IGNORE INTO " + this.table("dex_reward")
+                    + " (uuid, milestone) VALUES (?, ?)")) {
+                ps.setString(1, uuid.toString());
+                ps.setInt(2, milestone);
+                return ps.executeUpdate() > 0;
+            }
+        } catch (SQLException ex) {
+            this.logger.log(java.util.logging.Level.SEVERE, "MySQL 写入失败(dexClaim): " + ex, ex);
+            throw new StorageException("MySQL 写入 dexClaim(" + name + "/" + milestone + ") 失败: "
+                    + ex.getMessage(), ex);
+        } finally {
+            this.release(connection);
+        }
+    }
+
+    /** 单值整型查询的公用实现（读失败留痕并返回 0，与其它读方法一致）。 */
+    private int queryInt(String op, String sql, String... params) {
+        Connection connection = null;
+        try {
+            connection = this.borrow();
+            try (PreparedStatement ps = connection.prepareStatement(sql)) {
+                for (int i = 0; i < params.length; i++) {
+                    ps.setString(i + 1, params[i]);
+                }
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? rs.getInt(1) : 0;
+                }
+            }
+        } catch (SQLException ex) {
+            this.logger.log(java.util.logging.Level.SEVERE, "MySQL 查询失败(" + op + "): " + ex, ex);
+            return 0;
         } finally {
             this.release(connection);
         }

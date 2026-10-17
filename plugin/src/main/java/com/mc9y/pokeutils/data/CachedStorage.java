@@ -446,6 +446,83 @@ public class CachedStorage implements Storage {
         this.schedule(entry);
     }
 
+    // ------------------------------------------------------------ 委托 / 图鉴（透传）
+
+    /*
+     * 这两组方法刻意**不加缓存**，直接透传给后端。理由：
+     *
+     *   ① 它们不是热路径。委托一天只生成一次、进度在完成动作时才变；图鉴只在
+     *      合成成功时写一条、打开界面时读一次。缓存能省下的往返是「每人每天个位数」，
+     *      换来的却是「缓存与库不一致」的一整类新 bug（比如刚领完奖又看到可领）。
+     *   ② 写入语义里已经有「读改写」的地方（{@link #dexAdd} 的 amount+1 在 SQL 里完成），
+     *      一旦中间夹一层内存缓存，这个原子性就没了。
+     *   ③ 失败语义要保留。这些方法是同步调用，写失败就该抛给调用方 ——
+     *      走写回队列会把「领奖没落库」变成一件谁都看不见的事。
+     *
+     * 代价是 MySQL 上每次调用多一次网络往返，发生在主线程。实测这条路径每次合成
+     * 至多两次（图鉴 +1），单次往返在局域网内是亚毫秒级，可以接受。
+     */
+
+    @Override
+    public Set<String> listQuestDays(UUID uuid) {
+        return this.backend.listQuestDays(uuid);
+    }
+
+    @Override
+    public List<QuestData> getQuests(UUID uuid, String day) {
+        return this.backend.getQuests(uuid, day);
+    }
+
+    @Override
+    public void insertQuests(UUID uuid, String name, String day, List<QuestData> quests) {
+        this.backend.insertQuests(uuid, this.remember(uuid, name), day, quests);
+    }
+
+    @Override
+    public void setQuestProgress(UUID uuid, String day, int slot, int progress) {
+        this.backend.setQuestProgress(uuid, day, slot, progress);
+    }
+
+    @Override
+    public void setQuestClaimed(UUID uuid, String day, int slot) {
+        this.backend.setQuestClaimed(uuid, day, slot);
+    }
+
+    @Override
+    public int dexSpeciesCount(UUID uuid) {
+        return this.backend.dexSpeciesCount(uuid);
+    }
+
+    @Override
+    public int dexTotalCount(UUID uuid) {
+        return this.backend.dexTotalCount(uuid);
+    }
+
+    @Override
+    public Map<String, Integer> dexAll(UUID uuid) {
+        return this.backend.dexAll(uuid);
+    }
+
+    @Override
+    public int dexAdd(UUID uuid, String name, String species) {
+        return this.backend.dexAdd(uuid, this.remember(uuid, name), species);
+    }
+
+    @Override
+    public int dexAmount(UUID uuid, String species) {
+        return this.backend.dexAmount(uuid, species);
+    }
+
+    @Override
+    public Set<Integer> dexClaimed(UUID uuid) {
+        return this.backend.dexClaimed(uuid);
+    }
+
+    @Override
+    public boolean dexClaim(UUID uuid, String name, int milestone) {
+        return this.backend.dexClaim(uuid, this.remember(uuid, name), milestone);
+    }
+
     /** 记下 name -> uuid 并返回规范化后的名字（空名字会被写成空串而不是 NULL）。 */
     private String remember(UUID uuid, String name) {
         String safe = CachedStorage.nameOf(name);

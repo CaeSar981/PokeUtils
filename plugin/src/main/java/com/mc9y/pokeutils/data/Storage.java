@@ -3,6 +3,7 @@ package com.mc9y.pokeutils.data;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -82,6 +83,69 @@ public interface Storage {
 
     /** 写入连败所属的原料星级档（负数夹到 0）。 */
     void setFailStar(UUID uuid, String name, int star);
+
+    // ------------------------------------------------------------------ 每日委托
+
+    /**
+     * 该玩家在库里存在委托记录的日期列表（升序）。
+     *
+     * <p>只为 {@code /pu migrate} 存在：{@link #getQuests} 是按 {@code day} 查的，
+     * 迁移时必须先知道要搬哪些天，否则只能拿到「今天」那一份。
+     * 旧日期的委托本身没有业务价值，但一次迁移后数据不完整会让人怀疑整个迁移。</p>
+     */
+    Set<String> listQuestDays(UUID uuid);
+
+    /**
+     * 读取某玩家某一天已落库的委托（没有则返回空列表）。
+     *
+     * <p>按 {@code (uuid, day, slot)} 存。旧的行刻意不清理 —— 留着可以当历史查。</p>
+     */
+    List<QuestData> getQuests(UUID uuid, String day);
+
+    /**
+     * 落库一组委托。必须幂等：同一天重复调用不能冲掉已有进度。
+     *
+     * <p>实现上靠主键 + {@code INSERT OR IGNORE}（MySQL 是 {@code INSERT IGNORE}），
+     * 而不是「先查再插」—— 后者在并发下会插出两套。</p>
+     */
+    void insertQuests(UUID uuid, String name, String day, List<QuestData> quests);
+
+    /** 写入某条委托的进度（绝对值）。 */
+    void setQuestProgress(UUID uuid, String day, int slot, int progress);
+
+    /** 把某条委托标记为已领取。 */
+    void setQuestClaimed(UUID uuid, String day, int slot);
+
+    // ------------------------------------------------------------------ 合成图鉴
+
+    /** 图鉴里已收录的种族数（不同种族计数，不含重复产出）。 */
+    int dexSpeciesCount(UUID uuid);
+
+    /** 图鉴产出总次数（同一只合出几次算几次）。 */
+    int dexTotalCount(UUID uuid);
+
+    /** 图鉴内容快照：种族名 -> 产出次数（按次数倒序，界面直接顺序渲染）。 */
+    Map<String, Integer> dexAll(UUID uuid);
+
+    /** 记录一次产出，返回该种族累计产出次数。 */
+    int dexAdd(UUID uuid, String name, String species);
+
+    /** 某个种族的产出次数。 */
+    int dexAmount(UUID uuid, String species);
+
+    /** 已领取过的图鉴里程碑。 */
+    Set<Integer> dexClaimed(UUID uuid);
+
+    /**
+     * 领取一个里程碑奖励。
+     *
+     * @return {@code true} = 本次是首次领取（该发奖）；{@code false} = 已经领过
+     *
+     * <p><b>判重必须由数据库主键保证</b>（{@code INSERT OR IGNORE} 后看影响行数），
+     * 不能用「先查 {@link #dexClaimed} 再写」—— 玩家连点两下时两次调用在同一 tick
+     * 内依次执行，中间没有任何 await，先查后写会被直接绕过、奖励发两遍。</p>
+     */
+    boolean dexClaim(UUID uuid, String name, int milestone);
 
     /**
      * 原子增减某种粘剂，结果夹在 {@code [0, +∞)}，返回变更后的数量。

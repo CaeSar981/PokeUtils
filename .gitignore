@@ -29,3 +29,9 @@ reference/
 *.swp
 .DS_Store
 Thumbs.db
+
+# ---- 本地快捷编译检查（约 5 秒）----
+# 它复用 build/ 里的 stub 与 sqlite-relocated.jar，而 build/ 本身不入库，
+# 所以这个脚本单独提交也不能在干净检出上跑 —— 属于纯本地产物。
+.tmp-compile/
+

@@ -8,8 +8,10 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -84,6 +86,45 @@ public class SqliteStorage implements Storage {
             + "  amount INTEGER NOT NULL DEFAULT 0,"
             + "  PRIMARY KEY (uuid, type))";
 
+    /**
+     * 每日委托表。主键 (uuid, day, slot)。
+     *
+     * <p>按天分行、旧行不清理 —— 保留下来正好可以当「历史完成情况」查。
+     * 一天固定几条委托，靠主键 + INSERT OR IGNORE 保证「重复落库无副作用」。</p>
+     */
+    private static final String DDL_QUEST =
+            "CREATE TABLE IF NOT EXISTS pu_quest ("
+            + "  uuid     TEXT NOT NULL,"
+            + "  day      TEXT NOT NULL,"
+            + "  slot     INTEGER NOT NULL,"
+            + "  type     TEXT NOT NULL,"
+            + "  target   INTEGER NOT NULL DEFAULT 1,"
+            + "  star     INTEGER NOT NULL DEFAULT 0,"
+            + "  progress INTEGER NOT NULL DEFAULT 0,"
+            + "  claimed  INTEGER NOT NULL DEFAULT 0,"
+            + "  PRIMARY KEY (uuid, day, slot))";
+
+    /** 合成图鉴：每个玩家产出过哪些种族、各多少次。主键 (uuid, species)。 */
+    private static final String DDL_DEX =
+            "CREATE TABLE IF NOT EXISTS pu_dex ("
+            + "  uuid    TEXT NOT NULL,"
+            + "  species TEXT NOT NULL,"
+            + "  amount  INTEGER NOT NULL DEFAULT 0,"
+            + "  PRIMARY KEY (uuid, species))";
+
+    /**
+     * 已领取的图鉴里程碑。主键 (uuid, milestone)。
+     *
+     * <p>判重刻意压给数据库主键（{@code INSERT OR IGNORE} + {@code executeUpdate() > 0}），
+     * 而不是「先查后写」—— 玩家连点两下时两次调用在同一 tick 内依次执行，
+     * 「先查后写」会被直接绕过，奖励就发两遍。</p>
+     */
+    private static final String DDL_DEX_REWARD =
+            "CREATE TABLE IF NOT EXISTS pu_dex_reward ("
+            + "  uuid      TEXT NOT NULL,"
+            + "  milestone INTEGER NOT NULL,"
+            + "  PRIMARY KEY (uuid, milestone))";
+
     private final File dbFile;
     private final Logger logger;
     private SQLiteDataSource source;
@@ -123,6 +164,9 @@ public class SqliteStorage implements Storage {
         try (Statement st = this.connection.createStatement()) {
             st.executeUpdate(DDL_PLAYER);
             st.executeUpdate(DDL_STICKER);
+            st.executeUpdate(DDL_QUEST);
+            st.executeUpdate(DDL_DEX);
+            st.executeUpdate(DDL_DEX_REWARD);
         }
         this.ensurePlayerColumns();
     }
@@ -497,6 +541,269 @@ public class SqliteStorage implements Storage {
             this.log("setFailStar", ex);
             throw new StorageException("SQLite 写入 setFailStar(" + name + ") 失败: "
                     + ex.getMessage(), ex);
+        }
+    }
+
+    // ------------------------------------------------------------------ 每日委托
+
+    /** 该玩家存在委托记录的日期（升序）。只给迁移用。 */
+    public synchronized Set<String> listQuestDays(UUID uuid) {
+        Set<String> out = new java.util.LinkedHashSet<String>();
+        if (this.connection == null) {
+            return out;
+        }
+        try (PreparedStatement ps = this.connection.prepareStatement(
+                "SELECT DISTINCT day FROM pu_quest WHERE uuid = ? ORDER BY day ASC")) {
+            ps.setString(1, uuid.toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.add(rs.getString(1));
+                }
+            }
+        } catch (SQLException ex) {
+            this.log("listQuestDays", ex);
+        }
+        return out;
+    }
+
+    /** 读取某玩家某一天已落库的委托（没有则返回空列表）。 */
+    public synchronized List<QuestData> getQuests(UUID uuid, String day) {
+        List<QuestData> out = new ArrayList<QuestData>();
+        if (this.connection == null) {
+            return out;
+        }
+        try (PreparedStatement ps = this.connection.prepareStatement(
+                "SELECT slot, type, target, star, progress, claimed FROM pu_quest"
+                + " WHERE uuid = ? AND day = ? ORDER BY slot ASC")) {
+            ps.setString(1, uuid.toString());
+            ps.setString(2, day);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.add(new QuestData(rs.getInt(1), rs.getString(2), rs.getInt(3),
+                            rs.getInt(4), rs.getInt(5), rs.getInt(6) != 0));
+                }
+            }
+        } catch (SQLException ex) {
+            this.log("getQuests", ex);
+        }
+        return out;
+    }
+
+    /**
+     * 落库一组委托。
+     *
+     * <p>用 {@code INSERT OR IGNORE}：委托是「当天固定」的，重复落库必须是无副作用的 ——
+     * 否则玩家每打开一次界面就可能把已有进度冲掉。</p>
+     */
+    public synchronized void insertQuests(UUID uuid, String name, String day, List<QuestData> quests) {
+        if (quests == null || quests.isEmpty()) {
+            return;
+        }
+        if (this.connection == null) {
+            throw new StorageException("SQLite 连接不可用，无法写入委托(" + name + "/" + day + ")");
+        }
+        this.touchPlayer(uuid, name);
+        try (PreparedStatement ps = this.connection.prepareStatement(
+                "INSERT OR IGNORE INTO pu_quest (uuid, day, slot, type, target, star, progress, claimed)"
+                + " VALUES (?, ?, ?, ?, ?, ?, 0, 0)")) {
+            for (QuestData quest : quests) {
+                ps.setString(1, uuid.toString());
+                ps.setString(2, day);
+                ps.setInt(3, quest.getSlot());
+                ps.setString(4, quest.getType());
+                ps.setInt(5, quest.getTarget());
+                ps.setInt(6, quest.getStar());
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        } catch (SQLException ex) {
+            this.log("insertQuests", ex);
+            throw new StorageException("SQLite 写入 insertQuests(" + name + "/" + day + ") 失败: "
+                    + ex.getMessage(), ex);
+        }
+    }
+
+    public synchronized void setQuestProgress(UUID uuid, String day, int slot, int progress) {
+        if (this.connection == null) {
+            throw new StorageException("SQLite 连接不可用，无法写入委托进度(" + uuid + ")");
+        }
+        try (PreparedStatement ps = this.connection.prepareStatement(
+                "UPDATE pu_quest SET progress = ? WHERE uuid = ? AND day = ? AND slot = ?")) {
+            ps.setInt(1, Math.max(progress, 0));
+            ps.setString(2, uuid.toString());
+            ps.setString(3, day);
+            ps.setInt(4, slot);
+            ps.executeUpdate();
+        } catch (SQLException ex) {
+            this.log("setQuestProgress", ex);
+            throw new StorageException("SQLite 写入 setQuestProgress(" + uuid + "/" + day
+                    + "/" + slot + ") 失败: " + ex.getMessage(), ex);
+        }
+    }
+
+    public synchronized void setQuestClaimed(UUID uuid, String day, int slot) {
+        if (this.connection == null) {
+            throw new StorageException("SQLite 连接不可用，无法写入委托领取状态(" + uuid + ")");
+        }
+        try (PreparedStatement ps = this.connection.prepareStatement(
+                "UPDATE pu_quest SET claimed = 1 WHERE uuid = ? AND day = ? AND slot = ?")) {
+            ps.setString(1, uuid.toString());
+            ps.setString(2, day);
+            ps.setInt(3, slot);
+            ps.executeUpdate();
+        } catch (SQLException ex) {
+            this.log("setQuestClaimed", ex);
+            throw new StorageException("SQLite 写入 setQuestClaimed(" + uuid + "/" + day
+                    + "/" + slot + ") 失败: " + ex.getMessage(), ex);
+        }
+    }
+
+    // ------------------------------------------------------------------ 合成图鉴
+
+    /** 图鉴里已收录的种族数（不同种族计数，不含重复产出）。 */
+    public synchronized int dexSpeciesCount(UUID uuid) {
+        return this.queryInt("dexSpeciesCount",
+                "SELECT COUNT(*) FROM pu_dex WHERE uuid = ?", uuid.toString());
+    }
+
+    /** 图鉴产出总次数（同一只合出几次算几次）—— 即所有 amount 之和。 */
+    public synchronized int dexTotalCount(UUID uuid) {
+        return this.queryInt("dexTotalCount",
+                "SELECT COALESCE(SUM(amount), 0) FROM pu_dex WHERE uuid = ?", uuid.toString());
+    }
+
+    /**
+     * 图鉴内容快照：种族名 -> 产出次数。
+     *
+     * <p>按次数倒序、同次数按种族名升序 —— 界面直接顺序渲染即可，
+     * 不需要在 GUI 层再排一次（那里每次翻页都要重排会更慢）。</p>
+     */
+    public synchronized Map<String, Integer> dexAll(UUID uuid) {
+        Map<String, Integer> out = new java.util.LinkedHashMap<String, Integer>();
+        if (this.connection == null) {
+            return out;
+        }
+        try (PreparedStatement ps = this.connection.prepareStatement(
+                "SELECT species, amount FROM pu_dex WHERE uuid = ? ORDER BY amount DESC, species ASC")) {
+            ps.setString(1, uuid.toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.put(rs.getString(1), rs.getInt(2));
+                }
+            }
+        } catch (SQLException ex) {
+            this.log("dexAll", ex);
+        }
+        return out;
+    }
+
+    /**
+     * 记录一次产出，返回该种族累计产出次数。
+     *
+     * <p>先 {@code INSERT OR IGNORE} 建行、再 {@code amount = amount + 1} ——
+     * 这样「首次收录」和「重复产出」是同一条路径，不需要先查一次再决定插还是更。</p>
+     */
+    public synchronized int dexAdd(UUID uuid, String name, String species) {
+        if (species == null) {
+            return 0;
+        }
+        if (this.connection == null) {
+            throw new StorageException("SQLite 连接不可用，无法写入图鉴(" + name + "/" + species + ")");
+        }
+        this.touchPlayer(uuid, name);
+        String id = uuid.toString();
+        try {
+            try (PreparedStatement ps = this.connection.prepareStatement(
+                    "INSERT OR IGNORE INTO pu_dex (uuid, species, amount) VALUES (?, ?, 0)")) {
+                ps.setString(1, id);
+                ps.setString(2, species);
+                ps.executeUpdate();
+            }
+            try (PreparedStatement ps = this.connection.prepareStatement(
+                    "UPDATE pu_dex SET amount = amount + 1 WHERE uuid = ? AND species = ?")) {
+                ps.setString(1, id);
+                ps.setString(2, species);
+                ps.executeUpdate();
+            }
+        } catch (SQLException ex) {
+            this.log("dexAdd", ex);
+            throw new StorageException("SQLite 写入 dexAdd(" + name + "/" + species + ") 失败: "
+                    + ex.getMessage(), ex);
+        }
+        return this.dexAmount(uuid, species);
+    }
+
+    /** 某个种族的产出次数。 */
+    public synchronized int dexAmount(UUID uuid, String species) {
+        if (species == null) {
+            return 0;
+        }
+        return this.queryInt("dexAmount",
+                "SELECT amount FROM pu_dex WHERE uuid = ? AND species = ?",
+                uuid.toString(), species);
+    }
+
+    /** 已领取过的图鉴里程碑。 */
+    public synchronized Set<Integer> dexClaimed(UUID uuid) {
+        Set<Integer> out = new HashSet<Integer>();
+        if (this.connection == null) {
+            return out;
+        }
+        try (PreparedStatement ps = this.connection.prepareStatement(
+                "SELECT milestone FROM pu_dex_reward WHERE uuid = ?")) {
+            ps.setString(1, uuid.toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.add(Integer.valueOf(rs.getInt(1)));
+                }
+            }
+        } catch (SQLException ex) {
+            this.log("dexClaimed", ex);
+        }
+        return out;
+    }
+
+    /**
+     * 领取一个里程碑奖励。
+     *
+     * @return {@code true} 表示本次是首次领取（真的该发奖）；{@code false} 表示已经领过
+     */
+    public synchronized boolean dexClaim(UUID uuid, String name, int milestone) {
+        if (this.connection == null) {
+            throw new StorageException("SQLite 连接不可用，无法写入图鉴奖励(" + name + "/" + milestone + ")");
+        }
+        this.touchPlayer(uuid, name);
+        try (PreparedStatement ps = this.connection.prepareStatement(
+                "INSERT OR IGNORE INTO pu_dex_reward (uuid, milestone) VALUES (?, ?)")) {
+            ps.setString(1, uuid.toString());
+            ps.setInt(2, milestone);
+            return ps.executeUpdate() > 0;
+        } catch (SQLException ex) {
+            this.log("dexClaim", ex);
+            throw new StorageException("SQLite 写入 dexClaim(" + name + "/" + milestone + ") 失败: "
+                    + ex.getMessage(), ex);
+        }
+    }
+
+    /**
+     * 单值整型查询的公用实现（读失败留痕并返回 0，与其它读方法一致）。
+     *
+     * <p>图鉴的四个计数全是同一种形状，抽出来免得四份几乎相同的 try/catch。</p>
+     */
+    private int queryInt(String op, String sql, String... params) {
+        if (this.connection == null) {
+            return 0;
+        }
+        try (PreparedStatement ps = this.connection.prepareStatement(sql)) {
+            for (int i = 0; i < params.length; i++) {
+                ps.setString(i + 1, params[i]);
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        } catch (SQLException ex) {
+            this.log(op, ex);
+            return 0;
         }
     }
 

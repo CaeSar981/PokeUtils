@@ -43,6 +43,68 @@ Pixelmon（1.12.2）服务器的**精灵合成**插件。由原始 jar `PokeUtil
 - **日志保留策略**：`Compound.log.keep-days`，开机清理过期日志
 - **同 tick 防重复点击**：连点器在同一下里塞多次点击也只会结算一次
 
+第四轮：六组玩法（每一组都能单独关掉，见下文「功能开关」）：
+
+- **属性继承**（主界面槽 20）：合成时可勾选让产物继承父本的性格 / 特性 / 单项个体值，
+  额度由 `Compound.inherit.max-picks` 控制（默认 1 项）
+- **属性洗练**（`/pu reroll`）：花金币 + 粘剂把一只精灵的性格 / 特性 / 单项个体值重掷；
+  `improve-only` 打开时只会掷出不低于当前值的结果
+- **分解回收**（`/pu salvage`）：把一只精灵拆成金币 + 粘剂，返还比例按星级配
+- **粘剂合成**（`/pu craft`）：低阶粘剂 + 金币换高阶，配方写在 `Compound.sticker-craft`
+- **每日委托**（`/pu quest`）：每天按 `quest.daily-amount` 确定性生成几条（同一人同一天永远同一组），
+  完成后回界面交付领奖；`/pu questreset` 可作废当天全部委托
+- **合成图鉴**（`/pu dex`）：记录「合出过哪些种族、各多少次」，按 `dex.rewards`（默认 5 / 10 / 20 种）
+  发里程碑奖励；判重压在数据库主键上，连点两下不会重复发奖
+
+第七轮：
+
+- **电脑盒子选料**（`Compound.pc.enabled`）：材料来源从「只有 6 格队伍」扩到「队伍 **或** 电脑盒子」。
+  选料界面槽 40 是入口；**选中 ≠ 摘除** —— 只在真正点合成时才从盒子里取走，选完反悔取消不会丢精灵
+- **保底分档**（`Compound.pity.threshold-by-star`）：保底计数按「原料星级档」分别累计。
+  原实现是一个全局数字，于是可以在一星档垫刀把计数推到阈值、再去六星档消费保底 ——
+  保底被用在了它从未积累过的档位上。现在换档即重新计数，也可以给每档单独定阈值
+
+## 功能开关
+
+六个玩法与三个基础能力都有独立开关，全部默认开启。**入口按钮始终渲染**（即使功能关闭）——
+刻意如此：布局在任何配置下都稳定，玩家也不会因为管理员临时开关而「找不到按钮」。
+点击时会收到一句明确的「XX功能已关闭」，而不是静默无反应。
+
+| 开关 | 关掉后的效果 |
+| --- | --- |
+| `Compound.inherit.enabled` | 槽 20 点击只提示；合成不再继承任何属性（产物属性完全随机） |
+| `Compound.reroll.enabled` | 槽 22 与 `/pu reroll` 都只提示关闭；已开着的洗练面板不再响应 |
+| `Compound.salvage.enabled` | 槽 21 与 `/pu salvage` 都只提示关闭 |
+| `Compound.sticker-craft.enabled` | 槽 23 与 `/pu craft` 都只提示关闭 |
+| `Compound.quest.enabled` | 槽 24 与 `/pu quest` 都只提示关闭；**合成 / 分解 / 粘剂合成都不再累计委托进度** |
+| `Compound.dex.enabled` | 槽 25 与 `/pu dex` 都只提示关闭；**合成成功不再记录图鉴** |
+| `Compound.pc.enabled` | 选料界面不画「从电脑盒子选精灵」按钮（该格留白，点上去无反应） |
+| `Compound.preview.enabled` | 主界面不画「产出预览」按钮 |
+| `Compound.pity.enabled` | 关闭连败保底（提示也不会发） |
+| `Compound.broadcast.enabled` | 关闭高星合成成功的全服播报 |
+| `Compound.log.enabled` | 关闭合成流水日志（`/pu history`·`stats`·`top` 随之无数据） |
+
+关掉开关**不会删数据**：图鉴记录、委托进度、已领里程碑都原样躺在库里，重新打开就接着用。
+
+第四轮四组新玩法（合成主界面槽 20~25 六个入口；配置在 `Compound` 段的
+`inherit` / `reroll` / `salvage` / `sticker-craft` / `quest` / `dex` 六块）：
+
+- **属性继承**（`Compound.inherit`）：合成时把**父本**的性格 / 特性 / 个体值继承给产物。
+  界面里逐项勾选，可用 `max-picks` 限制同时继承几项；来源可以是父本 A 或父本 B（也可随机）。
+  特性**按槽位继承**（0 = 普通特性、1 = 隐藏特性），而不是按名字 —— 产物是另一个种族，
+  父本的特性名在产物身上往往不存在。个体值按 `iv-percent.min`~`iv-percent.max`（默认 50%~100%）
+  在父本该项 IV 的比例区间里取点；闪光的单 / 双项继承另有 `shiny.single-bonus` / `shiny.double-bonus` 加成。
+- **属性洗练**（`/pu reroll`）：花金币 + 粘剂，把一只精灵的性格 / 特性 / 单项个体值重掷。
+  `improve-only` 打开时只会掷出不低于当前值的结果。
+- **分解回收**（`/pu salvage`）：把一只精灵拆成金币 + 粘剂，返还比例按星级在
+  `salvage.sticker`（粘剂张数表）与 `salvage.money-percent`（金币返还百分比）里配。
+- **粘剂合成**（`/pu craft`）：用低阶粘剂 + 金币换高阶粘剂，配方写在 `sticker-craft.recipes`。
+- **每日委托**（`/pu quest`）：每天按 `quest.daily-amount` 生成固定几条委托（按 UUID + 日期**确定性**
+  生成，同一人同一天永远同一组），完成后回界面交付领奖；`/pu questreset` 可作废当天全部委托。
+- **合成图鉴**（`/pu dex`）：记录每个玩家「合成过哪些种族、各多少次」，按
+  `dex.rewards`（默认 5 / 10 / 20 种）发里程碑奖励。判重交给数据库主键
+  （`INSERT OR IGNORE`），连点两下不会重复发奖。
+
 ## 命令与权限
 
 | 命令 | 说明 | 权限 |
@@ -56,7 +118,19 @@ Pixelmon（1.12.2）服务器的**精灵合成**插件。由原始 jar `PokeUtil
 | `/pu stats [玩家]` | 全服 / 指定玩家的聚合统计 | 查全服需 `pokeutils.admin` |
 | `/pu top [success\|star] [条数]` | 合成排行榜（按成功次数 / 最高星级） | — |
 | `/pu debug` | 导出配置快照、产出池、存储状态 | `pokeutils.admin` |
+| `/pu salvage`（别名 `fenjie`） | 打开「分解回收」界面，把精灵拆成金币 + 粘剂 | 同 `/pu compound` 的 `Compound.use-permission` |
+| `/pu reroll`（别名 `xilian`） | 打开「属性洗练」界面，重掷性格 / 特性 / 单项个体值 | 同上 |
+| `/pu quest`（别名 `daily` / `weituo`） | 打开「每日委托」界面，交付并领奖 | 同上 |
+| `/pu dex`（别名 `tujian`） | 打开「合成图鉴」，领取里程碑奖励 | 同上 |
+| `/pu craft`（别名 `stickercraft`） | 打开「粘剂合成」界面，用低阶粘剂换高阶粘剂 | 同上 |
 | `/pu reload` | 重载配置文件（含粘剂定义） | `pokeutils.admin` |
+| `/pu questreset <玩家\|all>` | 作废当天的每日委托（进度清零 + 标记已领，不补发） | `pokeutils.admin` |
+| `/pu storage` | 存储后端健康度：缓存条目 / 待落盘 / 熔断状态 / 后端类型 | `pokeutils.admin` |
+| `/pu migrate <sqlite\|mysql> [dry-run]` | 把玩家数据整体搬到另一个后端（含粘剂、保底、**委托与图鉴**） | `pokeutils.admin` |
+
+第四轮那五个命令都遵循同一条设计：**命令只负责「校验 + 打开界面」**，真正的操作在界面里完成。
+它们都要针对「队伍里的某一只精灵」做事，而聊天栏里没法直观指认「第几只」；
+用界面选就不会选错，也不用记参数顺序。
 
 权限节点已写进 `plugin.yml`（原插件一个都没声明）：
 
@@ -119,7 +193,14 @@ PokeUtils/
         │   ├── data/LegacyDataMigration.java 旧版 Data/<玩家名>.yml -> 数据库 迁移 + 归档
         │   ├── data/StickerType.java         粘剂定义（读 config.yml 的 Compound.stickers）
         │   ├── data/VoucherType.java         合成券定义（读 config.yml 的 Compound.vouchers）
-        │   ├── data/CompoundLog.java         合成流水日志（写 logs/、解析与聚合）
+        │   ├── data/MaterialRef.java          材料引用的值对象（来源 PARTY / PC + 坐标）
+        │   ├── data/MaterialAccess.java       唯一知道「队伍 / 电脑盒子」差别的地方（解析·摘除·计数）
+        │   ├── data/CompoundLog.java         合成流水日志（写 logs/、按玩家聚合、排行榜）
+        │   ├── data/PokemonAttr.java         精灵属性的读写与重掷（IV / 性格 / 特性 / 闪光 + 继承算法）
+        │   ├── data/QuestType.java           委托类型枚举（SUCCESS / ATTEMPT / SALVAGE / STICKER / SUBMIT）
+        │   ├── data/QuestData.java           单条委托 + 按 UUID·日期确定性生成
+        │   ├── data/StickerRecipe.java       粘剂合成配方（from / to / amount / result / money）
+        │   ├── data/DexReward.java           图鉴里程碑奖励（种类数 / 金币 / 粘剂）
         │   └── listener/PokeCompoundPlayerListener.java  点击 / 拖拽 / 进出服 / 关界面
         └── resources/
             ├── plugin.yml
@@ -794,6 +875,74 @@ MySQL 侧有四个坑，都收敛在 `MysqlStorage` 里：
 - `handleGiveCommand` 的兜底解析在**正版验证模式**下不再调 `Bukkit.getOfflinePlayer`
   （那会同步请求 Mojang 的 profile 接口，网络不好时能把主线程卡住几秒）。
   离线模式行为不变。
+### 19b. ⚠️【同族、但更凶险】`getConfigurationSection` 遇到缺键会**凭空造一个空段**
+
+**症状**：老服的 `config.yml` 有 `Compound` 段、但没有后来新增的某个子段
+（第四轮实际是 `Compound.dex.rewards`）时，该功能**静默变空**：图鉴界面显示
+「奖励档位: 0 个」，三个里程碑格子退化成灰玻璃，玩家点什么都没反应、也没有任何报错。
+它不报错、不写日志，比第 19 条更难查。
+
+**根因**（`javap -c` 逐条核对过 CatServer 1.12.2 的 `MemorySection#getConfigurationSection`）：
+
+```
+get(path, null)                       // 本段没有 -> null
+  ↓ null 分支
+val = get(path, getDefault(path))     // getDefault 命中的是 **jar 内置 config.yml**，非 null
+  ↓ val instanceof ConfigurationSection == true
+return createSection(path)            // ← 在**当前配置里**新建一个空段返回
+```
+
+也就是说，只要 jar 内置 `config.yml` 里有这个段，`getConfigurationSection(...)` 就
+**永远不会返回 null** —— 它返回一个「非 null 但 `getKeys()` 为空」的占位段。
+于是形如 `if (section == null) { 用默认值 } else { 遍历 section }` 的写法必然走 else 分支、
+遍历到 0 项，默认值永远轮不到。
+
+**规避约定**：
+
+- 判断「这段到底配没配」要用 `section == null || section.getKeys(false).isEmpty()`，
+  不能只判 `null`。全插件只有 `getDexRewards()` 一处踩过（已修）。
+- 更稳的写法是**别用 section**：像 `loadStickerRecipes()` 那样用
+  `getMapList(path)` + `isEmpty()` 判空 —— 第 19 条已经证明了双参 `get` 不回退默认，
+  所以 `getMapList` 在缺键时**老老实实返回空表**，`isEmpty()` 反而可靠。
+  `loadQuestTypes()` 是另一种安全写法：逐键 `section.get(key + ".weight")`，
+  段为空时每个字段各自回退，所以它一开始就是对的。
+- 回归项 **N72** 里那条「奖励档位回退出厂 3 档」是这条的哨兵，
+  测试服磁盘上那份 `config.yml` **故意不含 `Compound.dex` 段**，正好持续守着这个行为。
+
+### 28. 第四轮：六组玩法（属性继承 / 属性洗练 / 分解回收 / 粘剂合成链 / 每日委托 / 合成图鉴）
+
+第三轮解决的是「界面好看、运营看得见」，但**玩**这件事本身还是空的：
+两只同星级精灵完全等价，合出一只歪个体值的高星精灵只能烂在队伍里，
+粘剂只会越积越多。第四轮补的是**决策**与**出口**：
+
+| 组 | 入口 | 解决的问题 |
+| --- | --- | --- |
+| 属性继承 | 主界面槽 20 | 材料从「等价」变成有优劣，抓精灵重新有意义 |
+| 属性洗练 | `/pu reroll` | 产物不够好时有补救手段，而不是只能重烧材料 |
+| 分解回收 | `/pu salvage` | 合歪的 / 重复的高星精灵有了出口，失败不再致命 |
+| 粘剂合成链 | `/pu craft` | 低阶粘剂有消耗口，高阶粘剂有产出路径 |
+| 每日委托 | `/pu quest` | 给玩家「今天上来干什么」的理由 |
+| 合成图鉴 | `/pu dex` | 把「合出过什么」变成长线收集目标 |
+
+几个刻意的设计取舍：
+
+- **特性按槽位继承，不按名字。** 产物是另一个种族，父本的特性名（如 `Blaze`）
+  在产物身上很可能不存在；槽位（0 普通 / 1 隐藏）则任何种族都有。
+- **`inherit.max-picks` 默认只有 1。** 多选会让「选哪一项」这个决策本身消失，
+  产物也容易强到破坏平衡；想放开在 `config.yml` 里改就行。
+- **个体值按父本区间取比例（默认 `iv-percent` 50~100），不是直接照抄。**
+  这样「用高个体材料」有明确回报，又不会让产物稳定满个体（31×6）。
+- **闪光只给**加成**（`shiny.single-bonus` 5% / `double-bonus` 25%），不做成必定闪光** ——
+  后者会直接把闪光的稀缺性抹平。
+- **委托按 `(UUID, 日期)` 确定性生成**，不在进服瞬间写库、也不允许「点开三次刷新出三套」。
+- **图鉴领取判重放在数据库主键上**（`INSERT OR IGNORE` + `executeUpdate() > 0`），
+  而不是「先查后写」：玩家连点两下时两次调用在同一 tick 内依次执行，「先查后写」会被绕过。
+
+第四轮的界面里，凡是要针对「队伍里的某一只精灵」操作的，一律**先开界面选精灵**再操作；
+对应地，子界面协议多了一条：**`isPokeUtilsGuiTitle` 必须列全所有子界面标题**，
+漏一个就会在关掉那个子界面时把整个合成会话误删（该插件最容易复发的 bug）。
+现在它列的是 **9 个**：继承 / 三种选精灵（分解·洗练·交付）/ 分解确认 / 洗练面板 /
+委托 / 粘剂合成 / 图鉴（第七轮的电脑盒子选料界面也在这个集合里）。
 
 ## 配置一览（第三轮新增键）
 
@@ -825,6 +974,143 @@ MySQL 侧有四个坑，都收敛在 `MysqlStorage` 里：
 | `Compound.feedback.title.title` | `§a合成成功` | 主标题 |
 | `Compound.feedback.title.subtitle` | `§f{star} §f{pokemon}` | 副标题，占位符 `{star}` / `{pokemon}` |
 | `Compound.feedback.title.fade-in` / `stay` / `fade-out` | `5` / `30` / `10` | Title 时长（tick） |
+
+## 配置一览（第四轮新增键）
+
+> 同样遵守修复记录第 19 条的约定：**代码里的字面量默认值必须与出厂 `config.yml` 完全一致**，
+> 否则「换了 jar 但沿用旧 config.yml」的服上，这些键会静默失效。
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `Compound.inherit.enabled` | `true` | 关掉后槽 20 点击只提示「功能已关闭」，合成退回「产物属性完全随机」 |
+| `Compound.inherit.max-picks` | `1` | 一次最多同时继承几项（性格 / 特性 / 个体值）；`0` = 关闭 |
+| `Compound.inherit.iv-percent.min` / `.max` | `50` / `100` | 个体值在「父本区间」里按比例取点的上下限 |
+| `Compound.inherit.shiny.single-bonus` | `5` | 单只父本闪光带来的产物闪光加成（%） |
+| `Compound.inherit.shiny.double-bonus` | `25` | 两只父本都闪光时的加成（%） |
+| `Compound.reroll.enabled` | `true` | 洗练开关 |
+| `Compound.reroll.price` | `20000` | 每次洗练金币 |
+| `Compound.reroll.sticker-type` | `PT` | 每次洗练消耗的粘剂（键名取自 `Compound.stickers`） |
+| `Compound.reroll.sticker-amount` | `1` | 消耗几个（`0` 则只扣金币） |
+| `Compound.reroll.iv-min` / `.max` | `0` / `31` | 单项 IV 重掷区间（Pixelmon 合法区间 0~31） |
+| `Compound.reroll.improve-only` | `false` | `true` = 只保留更好的结果（纯提升，不会洗坏） |
+| `Compound.salvage.enabled` | `true` | 分解开关 |
+| `Compound.salvage.sticker.<星级>` | `1:0 2:0 3:1 4:2 5:3 6:5 7:8` | 按星级返还的粘剂张数（没写的星级按 0） |
+| `Compound.salvage.sticker-type` | `PT` | 返还哪种粘剂 |
+| `Compound.salvage.money-percent` | `10` | 金币返还 = 该星级合成价格的百分之几 |
+| `Compound.sticker-craft.enabled` | `true` | 粘剂合成开关 |
+| `Compound.sticker-craft.recipes[]` | 1 条 `PT→JL` 示例 | 每条 = `from` / `to` / `amount` / `result` / `money` |
+| `Compound.quest.enabled` | `true` | 每日委托开关 |
+| `Compound.quest.daily-amount` | `3` | 每天生成几条 |
+| `Compound.quest.types.<TYPE>.weight` | 见 `config.yml` | 生成权重（`0` = 不生成该类） |
+| `Compound.quest.types.<TYPE>.targets` | 见 `config.yml` | 目标次数档次；`SUBMIT` 另有 `star` 门槛 |
+| `Compound.quest.types.<TYPE>.display` | 见 `config.yml` | 文案，占位符 `{target}` / `{star}` |
+| `Compound.quest.reward.money` | `20000` | 单条委托的金币奖励 |
+| `Compound.quest.reward.sticker-type` / `.sticker-amount` | `PT` / `2` | 单条委托的粘剂奖励 |
+| `Compound.dex.enabled` | `true` | 合成图鉴开关 |
+| `Compound.dex.rewards.<种类数>` | `5` / `10` / `20` 三档 | 每档 = `money` / `sticker-type` / `sticker-amount`；每档只能领一次 |
+
+## 配置一览（第七轮新增键）
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `Compound.pc.enabled` | `true` | 是否允许从电脑盒子选材料。关掉后选料界面**不画**入口按钮（那一格留白，点上去无反应） |
+| `Compound.pity.threshold-by-star` | `{}` | 按原料星级档单独定保底阈值，例如 `1: 3` / `6: 8`；**没列出的档位回退到 `threshold` 单值** |
+
+## 配置一览（存储 / 后台）
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `Storage.type` | `sqlite` | `sqlite` / `mysql` |
+| `Storage.sqlite.file` | `pokeutils.db` | 数据库文件（相对路径基于插件数据目录，也可写绝对路径） |
+| `Storage.sqlite.checkpoint-minutes` | `10` | 把 WAL 合并回主库并截断的间隔（`0` = 不开启） |
+| `Storage.mysql.host` / `port` / `database` / `user` / `password` | `127.0.0.1` / `3306` / `pokeutils` / `root` / 空 | 连接参数 |
+| `Storage.mysql.table-prefix` | `pu_` | 表名前缀，用来和同库其它插件隔开 |
+| `Storage.mysql.use-ssl` / `server-timezone` | `false` / 空 | MySQL 8 的 cj 驱动通常要填时区（如 `Asia/Shanghai`） |
+| `Storage.mysql.pool-size` | `4` | 连接池上限（写入走单线程，4 足够） |
+| `Storage.mysql.connect-timeout-ms` / `borrow-timeout-ms` | `5000` / `3000` | 建连接 / 借连接的等待上限 |
+| `Storage.mysql.fallback-to-sqlite` | `true` | 连不上时是否降到本地 SQLite。**`true` 意味着带着另一份数据上线**，两边会分叉；要「宁可不可用也不带错数据」就改 `false` |
+| `Storage.async.write-behind` | `auto` | `auto`（本地同步写穿 / 网络异步写回）/ `always` / `never` |
+| `Storage.async.flush-timeout-ms` | `5000` | 关服时最多等多久让写回队列排空 |
+| `Storage.async.worker-threads` | `2` | 后台计算线程数（重建流水索引、重载配置） |
+
+### 29. 第七轮：电脑盒子选料（`data/MaterialRef` + `data/MaterialAccess`）
+
+原来全仓库没有任何地方碰过 PC 的 API。想升的收藏品躺在盒子里时，玩家得先开 PC 取进队伍、
+还得先腾出空位 —— 这在合成流程里是一道纯手续。
+
+- `MaterialRef`：材料引用的值对象（`Source{PARTY, PC}` + box + slot）。`toPartyIndex()`
+  是兼容投影（电脑来源给 `-1`），`describe()` 里队伍来源只写数字、电脑来源写「箱子N·槽M」（1 基），
+  保证既有 `/pu debug` 的口径不变。
+- `MaterialAccess`：唯一知道两种来源差别的地方 —— 解析 / 摘除 / 队伍计数 / 箱子容量。
+  新增一类来源时只改这里。
+- **选中 ≠ 摘除**：会话里只记 `MaterialRef`，真正的 `consume` 发生在点「确认合成」那一刻。
+  若实现成「选中即从盒子摘出」，玩家选完反悔取消就等于把精灵搬了一次家。
+- 编译桩只加了 `PCStorage` 一个空壳，且只声明真正调用的 4 个方法。刻意**不**用
+  `PCBox.POKEMON_PER_BOX` —— 它是 `public static final int`，javac 会把值内联进调用方字节码，
+  将来 Pixelmon 改了这个常量而插件不重编就会静默错位。箱子容量改由
+  `getAll().length` / `getBoxCount()` 在运行期推。
+
+顺带修掉两个时序缺陷（都是这一改才暴露出来的）：
+
+1. `onInventoryClose` 里那条「2 tick 后回主界面」原先**无条件执行**，于是「从选料界面点进
+   电脑盒子」会在 2 tick 后被主界面顶掉 —— 玩家看到的是一进去就弹回，像按钮没生效。
+   判据改成「2 tick 后仍开着本插件的界面 = 界面切换，不是放弃」。
+2. `openPcSelectGui` 里 `select = true` 原先写在 `closeInventory()` **之前**，而
+   `closeInventory()` 会同步派发关闭事件、那个处理器把 `select` 清成 false（它把「关闭一个
+   选料类界面」理解成玩家放弃了选料）。于是「选料 → 盒子」这次切换吃掉了 select，
+   之后从盒子界面选好材料关闭时 `isSelect` 已是 false，没人负责回主界面、界面直接消失。
+   置位挪到 `closeInventory()` 之后。
+
+### 30. 第七轮：保底分档（`pu_player.fail_star` 列）
+
+原实现 `pity = streak >= threshold` 与星级无关，于是可以在一星档「垫刀」把计数推到阈值、
+再在六星档消费保底 —— 保底被用在了它从未积累过的档位上。
+
+- `pu_player` 加一列 `fail_star`，SQLite 与 MySQL 各自对既有库**自迁移**
+  （SQLite 吞 `duplicate column name`，MySQL 判错误码 `1060`；其它错误码照旧往上抛）。
+- 阈值可按键位配 `Compound.pity.threshold-by-star`，没配的档位回退到单值 `threshold`。
+  为什么需要它：各档失败代价差得很远（一星档亏 1000 金币，六星档亏 100 万），
+  同一套阈值套在所有档位上，要么让高星档的保底遥不可及，要么让低星档轻易触发。
+- 触发条件：`failStar == 0 || failStar == star1` 且 `streak >= threshold(star1)`。
+- 失败时 `nextStreak = (failStar != 0 && failStar != star1) ? 1 : streak + 1`；
+  成功时次数与档位一起清零。
+- ⚠️ **档位 0 的含义是「不知道」**（升级前的旧数据），不是「没档位」，判定时按「任意档位都算」。
+  否则升级会把老玩家攒了一半的进度清空。
+- `CachedStorage` 里 `dirtyStreak` 改名 `dirtyFailProgress`：次数与档位共用一个脏标记、
+  落盘时一起写 —— 只写一个会持久化出「次数记着、档位还是上一档」的错位。
+- `StorageMigrator` 也必须一起搬档位（以及委托与图鉴），否则刚迁完的服上保底能在任意档位触发、
+  图鉴里程碑会重发一遍。
+
+### 31. 2026-10-17：第四轮玩法回归 + 六个功能开关
+
+第四轮的六组玩法在 10-13 曾按用户要求整体回退，10-17 恢复。恢复时**没有**手工重写，
+而是用 git 的还原点做三方合并（`git cherry-pick`），只有 4 个文件冲突、且全部是「两边都要」的类型；
+真正需要重写的是存储层 —— 第四轮当年往 `SqliteStorage` 里直加表和 SQL，而现在的架构已经拆成
+`Storage` 接口 + SQLite/MySQL 双后端 + `CachedStorage` 门面 + `StorageMigrator`，
+于是那 3 张表 / 11 个方法要按新契约分别落到四处（并保留了新的失败语义：读降级留痕、写抛异常）。
+
+同时把开关补齐成**每个功能一个**，且所有入口（命令 / 主界面按钮 / 子界面）都受它控制：
+
+- 继承（槽 20）原先**漏了入口检查** —— `applyInheritanceTo` 内部有判断，所以合成确实不继承，
+  但界面照样能打开。已补，现在六个功能的入口判断走同一个 `openSubGuiIfEnabled`。
+- 数据写入侧也都有闸门：`recordDex` / `addQuestProgress` 内部检查开关，
+  所以功能关掉后**不会继续产生数据**（不是「只是点不进去」）。
+
+回归结果：`/putest link` 37/37、`verify-compat.py` 38/38、端到端 **705/705 全绿**（MySQL）。
+
+⚠️ 端到端第一次跑是 695/710，15 条红，**全部出在测试脚手架、插件零回归**，记在这里免得下次重踩：
+
+1. 第七轮把材料从两个 `int` 重构成 `MaterialRef` 时删掉了 `setSlot1(int)` / `setSlot2(int)`，
+   只留 `getSlot1()` 这个只读的「队伍下标投影」。第四轮的测试代码是照旧 API 写的，
+   而整条链路都是反射 —— **编译期一个字都不会提醒**，只在运行期抛 `NoSuchMethodException`，
+   连带把「点确认合成」变成「未选择齐精灵/合成粘剂」。写入要用 `setMaterial1(MaterialRef.ofParty(slot))`。
+2. `vipGrant` 跨轮次残留：`if (vipGrant == null) addAttachment(...)` 这个写法遇上
+   「玩家中途退出 → 本轮中止且不执行 restore」时，字段里会留着**上一个 Player 实例**的附件，
+   下一轮直接跳过授予，`hasPermission("vip.yx")` 变 false，六星失败「保留一只」走成「两只都扣」。
+   附件绑定在具体 Player 实例上，跨轮次状态必须无条件重建。
+3. 顺带修掉一个更严重的问题：测试的 `restore()` 原本是一整块 `try`，
+   第一行清理附件抛异常就把「换回队伍 / 金币 / 粘剂」整段跳过 —— 报告上只有一条「状态还原」红，
+   实际后果是玩家账号被留在测试数据上。已拆成三段各自兜异常。
 
 ## 编译桩的类型种类（重要）
 

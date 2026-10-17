@@ -7,6 +7,10 @@ import com.mc9y.pokeutils.data.CompoundLog;
 import com.mc9y.pokeutils.data.LogIndex;
 import com.mc9y.pokeutils.data.LogWriter;
 import com.mc9y.pokeutils.data.PlayerData;
+import com.mc9y.pokeutils.data.PokemonAttr;
+import com.mc9y.pokeutils.data.QuestData;
+import com.mc9y.pokeutils.data.QuestType;
+import com.mc9y.pokeutils.data.StickerRecipe;
 import com.mc9y.pokeutils.data.Storage;
 import com.mc9y.pokeutils.data.StorageFactory;
 import com.mc9y.pokeutils.data.StorageMigrator;
@@ -14,12 +18,20 @@ import com.mc9y.pokeutils.data.StickerType;
 import com.mc9y.pokeutils.data.VoucherType;
 import com.mc9y.pokeutils.data.YSData;
 import com.mc9y.pokeutils.listener.PokeCompoundPlayerListener;
+import com.pixelmonmod.pixelmon.Pixelmon;
+import com.pixelmonmod.pixelmon.api.pokemon.Pokemon;
+import com.pixelmonmod.pixelmon.storage.PlayerPartyStorage;
 import java.io.File;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import net.milkbowl.vault.economy.Economy;
@@ -106,6 +118,62 @@ public class PokeUtils extends JavaPlugin {
         return m;
     }
 
+    // ================================================================ 第四轮新增能力的出厂默认值
+    //
+    // ⚠️ 与 DEFAULT_PRICE / DEFAULT_SOUNDS 同一套约定：这里的字面量必须与 jar 内置
+    //    config.yml 里的值<b>逐位一致</b>。原因是 Bukkit 的双参读取
+    //    （getInt(path, def) / getString(path, def) / getBoolean(path, def)）
+    //    <b>不会</b>回退到 jar 内置配置 —— 磁盘上的旧 config.yml 里没有这些新键时，
+    //    def 就是最终生效值。详见 DEFAULT_SOUNDS 上方那段说明。
+    //
+    // 另一个后果值得单独提醒：这些新能力在「只换 jar、没换 config.yml」的老服上
+    // 依然会按出厂值正常工作（而不是静默失效），这是刻意设计的。
+
+    private static final boolean DEFAULT_INHERIT_ENABLED = true;
+    private static final int DEFAULT_INHERIT_MAX_PICKS = 1;
+    private static final int DEFAULT_INHERIT_IV_MIN = 50;
+    private static final int DEFAULT_INHERIT_IV_MAX = 100;
+    private static final int DEFAULT_INHERIT_SHINY_SINGLE = 5;
+    private static final int DEFAULT_INHERIT_SHINY_DOUBLE = 25;
+
+    private static final boolean DEFAULT_REROLL_ENABLED = true;
+    private static final int DEFAULT_REROLL_PRICE = 20000;
+    private static final String DEFAULT_REROLL_STICKER = "PT";
+    private static final int DEFAULT_REROLL_STICKER_AMOUNT = 1;
+    private static final int DEFAULT_REROLL_IV_MIN = 0;
+    private static final int DEFAULT_REROLL_IV_MAX = 31;
+    private static final boolean DEFAULT_REROLL_IMPROVE_ONLY = false;
+
+    private static final boolean DEFAULT_SALVAGE_ENABLED = true;
+    /** 下标 = 精灵星级；即「分解一只 N 星精灵返还多少粘剂」。 */
+    private static final int[] DEFAULT_SALVAGE_STICKER = {0, 0, 0, 1, 2, 3, 5, 8};
+    private static final String DEFAULT_SALVAGE_STICKER_TYPE = "PT";
+    private static final int DEFAULT_SALVAGE_MONEY_PERCENT = 10;
+
+    private static final boolean DEFAULT_STICKER_CRAFT_ENABLED = true;
+
+    private static final boolean DEFAULT_QUEST_ENABLED = true;
+    private static final int DEFAULT_QUEST_AMOUNT = 3;
+    private static final String[] DEFAULT_QUEST_KEYS = {"SUCCESS", "ATTEMPT", "SALVAGE", "STICKER", "SUBMIT"};
+    private static final int[] DEFAULT_QUEST_WEIGHTS = {3, 3, 2, 2, 2};
+    private static final String[] DEFAULT_QUEST_TARGETS = {"2,3,5", "3,5,8", "1,2,3", "1,2,3", "1"};
+    private static final String[] DEFAULT_QUEST_DISPLAYS = {
+        "§a成功合成 §f{target} §a次精灵",
+        "§a进行 §f{target} §a次精灵合成",
+        "§a分解回收 §f{target} §a只精灵",
+        "§a合成 §f{target} §a次粘剂",
+        "§a交付一只 §f{star}星 §a及以上的精灵"};
+    private static final int DEFAULT_QUEST_SUBMIT_STAR = 4;
+    private static final int DEFAULT_QUEST_REWARD_MONEY = 20000;
+    private static final String DEFAULT_QUEST_REWARD_STICKER = "PT";
+    private static final int DEFAULT_QUEST_REWARD_STICKER_AMOUNT = 2;
+
+    private static final boolean DEFAULT_DEX_ENABLED = true;
+    private static final int[] DEFAULT_DEX_MILESTONES = {5, 10, 20};
+    private static final int[] DEFAULT_DEX_MONEY = {50000, 200000, 500000};
+    private static final String[] DEFAULT_DEX_STICKERS = {"PT", "JL", "JL"};
+    private static final int[] DEFAULT_DEX_STICKER_AMOUNTS = {2, 1, 3};
+
     /** 星级的汉字写法（命令输出用）。 */
     private static final String[] NUMERALS = {"", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"};
 
@@ -114,6 +182,12 @@ public class PokeUtils extends JavaPlugin {
 
     /** 合成券定义缓存；同样在 {@code /pu reload} 时失效。 */
     private List<VoucherType> vouchers;
+
+    /** 粘剂合成配方缓存；{@code /pu reload} 时失效。 */
+    private List<StickerRecipe> stickerRecipes;
+
+    /** 每日委托类型定义缓存；{@code /pu reload} 时失效。 */
+    private List<QuestType> questTypes;
 
     /** 「本服务端没有 sendActionBar」的告警只打一次，避免刷屏。 */
     private boolean actionBarWarned;
@@ -330,7 +404,25 @@ public class PokeUtils extends JavaPlugin {
             int rate = intOf(raw.get("rate"), index < DEFAULT_STICKER_RATES.length ? DEFAULT_STICKER_RATES[index] : 0);
             String insufficient = stringOf(raw.get("insufficient"), " " + display);
             int slot = intOf(raw.get("slot"), STICKER_SLOT_BASE + index);
-            out.add(new StickerType(key, display, material, potion, rate, insufficient, slot));
+            // 第四轮新增的两个可选字段。缺省值与原实现的行为完全一致：
+            // protect=false（失败照常消耗材料）、pool 为空（不做定向）。
+            boolean protect = false;
+            Object protectRaw = raw.get("protect");
+            if (protectRaw instanceof Boolean) {
+                protect = (Boolean) protectRaw;
+            } else if (protectRaw != null) {
+                protect = Boolean.parseBoolean(String.valueOf(protectRaw));
+            }
+            List<String> pool = new ArrayList<String>();
+            Object poolRaw = raw.get("pool");
+            if (poolRaw instanceof List<?>) {
+                for (Object item : (List<?>) poolRaw) {
+                    if (item != null && !String.valueOf(item).trim().isEmpty()) {
+                        pool.add(String.valueOf(item).trim());
+                    }
+                }
+            }
+            out.add(new StickerType(key, display, material, potion, rate, insufficient, slot, protect, pool));
         }
 
         if (!out.isEmpty()) {
@@ -340,7 +432,8 @@ public class PokeUtils extends JavaPlugin {
         for (int i = 0; i < DEFAULT_STICKER_KEYS.length; i++) {
             out.add(new StickerType(DEFAULT_STICKER_KEYS[i], DEFAULT_STICKER_DISPLAYS[i],
                     Material.valueOf(DEFAULT_STICKER_MATERIALS[i]), DEFAULT_STICKER_POTIONS[i],
-                    DEFAULT_STICKER_RATES[i], DEFAULT_STICKER_INSUFFICIENT[i], STICKER_SLOT_BASE + i));
+                    DEFAULT_STICKER_RATES[i], DEFAULT_STICKER_INSUFFICIENT[i], STICKER_SLOT_BASE + i,
+                    false, Collections.<String>emptyList()));
         }
         return out;
     }
@@ -412,6 +505,25 @@ public class PokeUtils extends JavaPlugin {
 
     private static String stringOf(Object value, String fallback) {
         return value == null ? fallback : String.valueOf(value);
+    }
+
+    /**
+     * 去掉字符串开头的第一个颜色码（如 {@code §a精良粘剂 -> 精良粘剂}）。
+     *
+     * <p>粘剂 / 精灵这类名字在配置里本身就带颜色（{@code display: "§a精良粘剂"}），
+     * 而它们经常被拼进「自带颜色」的模板里 —— 直接拼就会得到 {@code §a个§a精良粘剂}
+     * 这种重复色码。渲染出来看不出差别，但一条日志、一个断言都会被它坑，
+     * 所以拼之前先把名字自带的颜色剥掉一层。
+     */
+    private static String stripLeadColor(String text) {
+        if (text == null || text.length() < 2) {
+            return text;
+        }
+        char c = text.charAt(0);
+        if ((c == '\u00a7' || c == '&') && "0123456789abcdefklmnorABCDEFKLMNOR".indexOf(text.charAt(1)) >= 0) {
+            return text.substring(2);
+        }
+        return text;
     }
 
     private static int intOf(Object value, int fallback) {
@@ -1141,6 +1253,771 @@ public class PokeUtils extends JavaPlugin {
         }
     }
 
+    // ================================================================ 第四轮新增：属性继承
+    // 这一节与下一节的读法完全统一：全部走「双参读取 + 代码内字面量默认值」，
+    // 且字面量与出厂 config.yml 逐位一致。于是「只换 jar、沿用旧 config.yml」的服
+    // 也能拿到完整的新玩法，而不是静默失效。
+
+    /** 属性继承总开关。关闭后继承设置入口不再出现。 */
+    public boolean isInheritEnabled() {
+        return this.getConfig().getBoolean("Compound.inherit.enabled", DEFAULT_INHERIT_ENABLED);
+    }
+
+    /** 一次合成最多能同时继承几项。0 视为关闭继承。 */
+    public int getInheritMaxPicks() {
+        int picks = this.getConfig().getInt("Compound.inherit.max-picks", DEFAULT_INHERIT_MAX_PICKS);
+        return Math.max(picks, 0);
+    }
+
+    public int getInheritIvMinPercent() {
+        return this.getConfig().getInt("Compound.inherit.iv-percent.min", DEFAULT_INHERIT_IV_MIN);
+    }
+
+    public int getInheritIvMaxPercent() {
+        return this.getConfig().getInt("Compound.inherit.iv-percent.max", DEFAULT_INHERIT_IV_MAX);
+    }
+
+    public int getInheritShinySingleBonus() {
+        return this.getConfig().getInt("Compound.inherit.shiny.single-bonus", DEFAULT_INHERIT_SHINY_SINGLE);
+    }
+
+    public int getInheritShinyDoubleBonus() {
+        return this.getConfig().getInt("Compound.inherit.shiny.double-bonus", DEFAULT_INHERIT_SHINY_DOUBLE);
+    }
+
+    // ================================================================ 第四轮新增：洗练
+
+    public boolean isRerollEnabled() {
+        return this.getConfig().getBoolean("Compound.reroll.enabled", DEFAULT_REROLL_ENABLED);
+    }
+
+    public int getRerollPrice() {
+        return this.getConfig().getInt("Compound.reroll.price", DEFAULT_REROLL_PRICE);
+    }
+
+    public String getRerollStickerType() {
+        return this.getConfig().getString("Compound.reroll.sticker-type", DEFAULT_REROLL_STICKER);
+    }
+
+    public int getRerollStickerAmount() {
+        return this.getConfig().getInt("Compound.reroll.sticker-amount", DEFAULT_REROLL_STICKER_AMOUNT);
+    }
+
+    public int getRerollIvMin() {
+        return this.getConfig().getInt("Compound.reroll.iv-min", DEFAULT_REROLL_IV_MIN);
+    }
+
+    public int getRerollIvMax() {
+        return this.getConfig().getInt("Compound.reroll.iv-max", DEFAULT_REROLL_IV_MAX);
+    }
+
+    public boolean isRerollImproveOnly() {
+        return this.getConfig().getBoolean("Compound.reroll.improve-only", DEFAULT_REROLL_IMPROVE_ONLY);
+    }
+
+    // ================================================================ 第四轮新增：分解回收
+
+    public boolean isSalvageEnabled() {
+        return this.getConfig().getBoolean("Compound.salvage.enabled", DEFAULT_SALVAGE_ENABLED);
+    }
+
+    /** 分解一只 star 星精灵返还的粘剂数量。 */
+    public int getSalvageSticker(int star) {
+        int fallback = star >= 0 && star < DEFAULT_SALVAGE_STICKER.length ? DEFAULT_SALVAGE_STICKER[star] : 0;
+        return this.getConfig().getInt("Compound.salvage.sticker." + star, fallback);
+    }
+
+    public String getSalvageStickerType() {
+        return this.getConfig().getString("Compound.salvage.sticker-type", DEFAULT_SALVAGE_STICKER_TYPE);
+    }
+
+    public int getSalvageMoneyPercent() {
+        return this.getConfig().getInt("Compound.salvage.money-percent", DEFAULT_SALVAGE_MONEY_PERCENT);
+    }
+
+    /** 分解一只 star 星精灵返还的金币（按该星级合成价格的百分比算）。 */
+    public int getSalvageMoney(int star) {
+        return (int) ((long) this.getCompoundPrice(star) * this.getSalvageMoneyPercent() / 100L);
+    }
+
+    // ================================================================ 第四轮新增：粘剂合成链
+
+    public boolean isStickerCraftEnabled() {
+        return this.getConfig().getBoolean("Compound.sticker-craft.enabled", DEFAULT_STICKER_CRAFT_ENABLED);
+    }
+
+    /** 粘剂合成配方（惰性加载 + 缓存，{@code /pu reload} 时失效）。 */
+    public List<StickerRecipe> getStickerRecipes() {
+        if (this.stickerRecipes == null) {
+            this.stickerRecipes = this.loadStickerRecipes();
+        }
+        return this.stickerRecipes;
+    }
+
+    public void invalidateStickerRecipes() {
+        this.stickerRecipes = null;
+    }
+
+    private List<StickerRecipe> loadStickerRecipes() {
+        List<StickerRecipe> out = new ArrayList<StickerRecipe>();
+        List<Map<?, ?>> raw = this.getConfig().getMapList("Compound.sticker-craft.recipes");
+        if (raw.isEmpty()) {
+            // 出厂默认：3 个普通粘剂 + 5000 金币 -> 1 个精良粘剂
+            out.add(new StickerRecipe("PT", "JL", 3, 1, 5000));
+            return out;
+        }
+        for (Map<?, ?> entry : raw) {
+            String from = stringOf(entry.get("from"), null);
+            String to = stringOf(entry.get("to"), null);
+            int amount = intOf(entry.get("amount"), 0);
+            int result = intOf(entry.get("result"), 0);
+            int money = intOf(entry.get("money"), 0);
+            StickerRecipe recipe = new StickerRecipe(from, to, amount, result, money);
+            if (recipe.isValid()) {
+                out.add(recipe);
+            } else {
+                this.getLogger().warning("Compound.sticker-craft.recipes 里有一条配方字段不完整，已跳过: "
+                        + from + " -> " + to + " (amount=" + amount + ", result=" + result + ", money=" + money + ")");
+            }
+        }
+        return out;
+    }
+
+    // ================================================================ 第四轮新增：每日委托
+
+    public boolean isQuestEnabled() {
+        return this.getConfig().getBoolean("Compound.quest.enabled", DEFAULT_QUEST_ENABLED);
+    }
+
+    public int getQuestDailyAmount() {
+        return Math.max(this.getConfig().getInt("Compound.quest.daily-amount", DEFAULT_QUEST_AMOUNT), 0);
+    }
+
+    /** 委托类型定义（只保留 weight > 0 的），惰性加载 + 缓存。 */
+    public List<QuestType> getQuestTypes() {
+        if (this.questTypes == null) {
+            this.questTypes = this.loadQuestTypes();
+        }
+        return this.questTypes;
+    }
+
+    public void invalidateQuestTypes() {
+        this.questTypes = null;
+    }
+
+    private List<QuestType> loadQuestTypes() {
+        List<QuestType> out = new ArrayList<QuestType>();
+        org.bukkit.configuration.ConfigurationSection section =
+                this.getConfig().getConfigurationSection("Compound.quest.types");
+        for (int i = 0; i < DEFAULT_QUEST_KEYS.length; i++) {
+            String key = DEFAULT_QUEST_KEYS[i];
+            if (section == null) {
+                // 整段缺失：用出厂默认（管理员把 quest 段删了也仍然可用）
+                out.add(new QuestType(key, DEFAULT_QUEST_WEIGHTS[i],
+                        parseIntList(DEFAULT_QUEST_TARGETS[i], null),
+                        DEFAULT_QUEST_SUBMIT_STAR, DEFAULT_QUEST_DISPLAYS[i]));
+                continue;
+            }
+            // 注意这里是单参 get：它才看得到 jar 内置的出厂值，双参看不到。
+            Object rawWeight = section.get(key + ".weight");
+            Object rawTargets = section.get(key + ".targets");
+            Object rawStar = section.get(key + ".star");
+            Object rawDisplay = section.get(key + ".display");
+            int weight = rawWeight == null ? DEFAULT_QUEST_WEIGHTS[i] : intOf(rawWeight, DEFAULT_QUEST_WEIGHTS[i]);
+            int star = rawStar == null ? DEFAULT_QUEST_SUBMIT_STAR : intOf(rawStar, DEFAULT_QUEST_SUBMIT_STAR);
+            String display = rawDisplay == null ? DEFAULT_QUEST_DISPLAYS[i] : String.valueOf(rawDisplay);
+            List<Integer> targets = rawTargets == null
+                    ? parseIntList(DEFAULT_QUEST_TARGETS[i], null)
+                    : parseIntList(null, rawTargets);
+            out.add(new QuestType(key, weight, targets, star, display));
+        }
+        List<QuestType> enabled = new ArrayList<QuestType>();
+        for (QuestType type : out) {
+            if (type.getWeight() > 0) {
+                enabled.add(type);
+            }
+        }
+        return enabled;
+    }
+
+    /** 把 {@code "2,3,5"} 或一个 {@code List} 解析成整数列表。 */
+    private static List<Integer> parseIntList(String csv, Object rawList) {
+        List<Integer> out = new ArrayList<Integer>();
+        if (rawList instanceof List<?>) {
+            for (Object item : (List<?>) rawList) {
+                int value = intOf(item, Integer.MIN_VALUE);
+                if (value != Integer.MIN_VALUE) {
+                    out.add(value);
+                }
+            }
+        } else if (csv != null) {
+            for (String part : csv.split(",")) {
+                int value = parseInt(part, Integer.MIN_VALUE);
+                if (value != Integer.MIN_VALUE) {
+                    out.add(value);
+                }
+            }
+        }
+        if (out.isEmpty()) {
+            out.add(1);
+        }
+        return out;
+    }
+
+    public int getQuestRewardMoney() {
+        return this.getConfig().getInt("Compound.quest.reward.money", DEFAULT_QUEST_REWARD_MONEY);
+    }
+
+    public String getQuestRewardSticker() {
+        return this.getConfig().getString("Compound.quest.reward.sticker-type", DEFAULT_QUEST_REWARD_STICKER);
+    }
+
+    public int getQuestRewardStickerAmount() {
+        return this.getConfig().getInt("Compound.quest.reward.sticker-amount", DEFAULT_QUEST_REWARD_STICKER_AMOUNT);
+    }
+
+    /**
+     * 今天的日期标识（{@code yyyy-MM-dd}）。
+     *
+     * <p>用服务端本地时区而不是 UTC —— 玩家感知到的「今天」是本地时间的今天，
+     * 用 UTC 会让每天的刷新发生在半夜之外的奇怪时刻。</p>
+     */
+    public String today() {
+        return new SimpleDateFormat("yyyy-MM-dd").format(new Date());
+    }
+
+    /**
+     * 取某个玩家今天的委托面板。
+     *
+     * <p>库里还没有今天的记录时才生成并落库 —— 委托是「当天固定」的，
+     * 生成算法只依赖 (UUID, 日期) 所以结果稳定，落库只是为了让进度有地方存。</p>
+     */
+    public List<QuestData> getQuestBoard(Player p) {
+        String day = this.today();
+        List<QuestData> generated = QuestData.generate(p.getUniqueId(), day,
+                this.getQuestTypes(), this.getQuestDailyAmount());
+        if (this.storage == null) {
+            return generated;
+        }
+        List<QuestData> stored = this.storage.getQuests(p.getUniqueId(), day);
+        if (!stored.isEmpty()) {
+            return stored;
+        }
+        this.storage.insertQuests(p.getUniqueId(), p.getName(), day, generated);
+        stored = this.storage.getQuests(p.getUniqueId(), day);
+        // 落库失败（或者这一瞬间数据库有问题）时也别让界面空着
+        return stored.isEmpty() ? generated : stored;
+    }
+
+    /**
+     * 累加某类委托的进度。
+     *
+     * <p>一次操作可能同时推进多条同类委托（例如两条都是「成功合成」），所以这里遍历全部
+     * 而不是找到第一条就返回。已领取或已满的委托不再累加，避免进度无限增长之后
+     * 界面显示「7 / 3」这种数字。</p>
+     */
+    public void addQuestProgress(Player p, String type, int delta) {
+        if (!this.isQuestEnabled() || delta <= 0) {
+            return;
+        }
+        String day = this.today();
+        for (QuestData quest : this.getQuestBoard(p)) {
+            if (!type.equals(quest.getType()) || quest.isClaimed() || quest.isComplete()) {
+                continue;
+            }
+            int next = Math.min(quest.getProgress() + delta, quest.getTarget());
+            if (next == quest.getProgress()) {
+                continue;
+            }
+            quest.setProgress(next);
+            if (this.storage != null) {
+                this.storage.setQuestProgress(p.getUniqueId(), day, quest.getSlot(), next);
+            }
+        }
+    }
+
+    /**
+     * 交付类委托：把选中的精灵交给系统。
+     *
+     * @return 交付是否成功（成功时已完成委托并发放奖励）
+     */
+    public boolean submitQuest(Player p, int questSlot, int partySlot) {
+        PlayerPartyStorage pps = Pixelmon.storageManager.getParty(p.getUniqueId());
+        Pokemon pokemon = pps == null ? null : pps.get(partySlot);
+        if (pokemon == null) {
+            p.sendMessage("§3精灵合成 §f|| §c所选精灵已不存在!");
+            return false;
+        }
+        QuestData target = null;
+        for (QuestData quest : this.getQuestBoard(p)) {
+            if (quest.getSlot() == questSlot) {
+                target = quest;
+                break;
+            }
+        }
+        if (target == null || !QuestType.SUBMIT.equals(target.getType())) {
+            p.sendMessage("§3精灵合成 §f|| §c该委托不存在或不是交付类委托!");
+            return false;
+        }
+        if (target.isClaimed()) {
+            p.sendMessage("§3精灵合成 §f|| §c这条委托已经领取过了!");
+            return false;
+        }
+        int star = new PokeStarAPI().getPokemonStar(pokemon.getSpecies().name());
+        if (star < target.getStar()) {
+            p.sendMessage("§3精灵合成 §f|| §c这条委托需要 " + starName(target.getStar())
+                    + " 及以上的精灵, 你选的是 " + starName(star) + "!");
+            return false;
+        }
+
+        // 先扣精灵再发奖。反过来的话，发奖过程中一旦出异常，玩家可以靠重复交付白拿奖励。
+        pps.set(partySlot, null);
+        p.closeInventory();
+        target.setProgress(target.getTarget());
+        if (this.storage != null) {
+            this.storage.setQuestProgress(p.getUniqueId(), this.today(), questSlot, target.getTarget());
+        }
+        this.grantQuestReward(p);
+        this.markClaimed(p, target);
+        p.sendMessage("§3精灵合成 §f|| §a已交付 " + starName(star) + " 精灵, 委托完成并领取奖励!");
+        this.addQuestProgress(p, QuestType.SUBMIT, 0);
+        return true;
+    }
+
+    /**
+     * 领取一条已经达标的委托。
+     *
+     * @return 是否真的领到了（false 时已发过对应提示）
+     */
+    public boolean claimQuest(Player p, int questSlot) {
+        QuestData target = null;
+        for (QuestData quest : this.getQuestBoard(p)) {
+            if (quest.getSlot() == questSlot) {
+                target = quest;
+                break;
+            }
+        }
+        if (target == null) {
+            p.sendMessage("§3精灵合成 §f|| §c该委托不存在!");
+            return false;
+        }
+        if (QuestType.SUBMIT.equals(target.getType())) {
+            // 交付类不能空手领 —— 否则「交付一只四星精灵」可以靠点一下按钮白拿。
+            p.sendMessage("§3精灵合成 §f|| §c这条是交付类委托, 请在界面上选择要交付的精灵!");
+            return false;
+        }
+        if (target.isClaimed()) {
+            p.sendMessage("§3精灵合成 §f|| §c这条委托已经领取过了!");
+            return false;
+        }
+        if (!target.isComplete()) {
+            p.sendMessage("§3精灵合成 §f|| §c这条委托还没完成 (§f"
+                    + target.getProgress() + "§c/§f" + target.getTarget() + "§c)!");
+            return false;
+        }
+        this.grantQuestReward(p);
+        this.markClaimed(p, target);
+        p.sendMessage("§3精灵合成 §f|| §a委托奖励已领取!");
+        return true;
+    }
+
+    private void markClaimed(Player p, QuestData quest) {
+        quest.setClaimed(true);
+        if (this.storage != null) {
+            this.storage.setQuestClaimed(p.getUniqueId(), this.today(), quest.getSlot());
+        }
+    }
+
+    private void grantQuestReward(Player p) {
+        int money = this.getQuestRewardMoney();
+        String stickerKey = this.getQuestRewardSticker();
+        int stickerAmount = this.getQuestRewardStickerAmount();
+        if (money > 0 && this.economy != null) {
+            this.economy.depositPlayer((OfflinePlayer) p, (double) money);
+        }
+        StickerType sticker = this.getStickerType(stickerKey);
+        if (sticker != null && stickerAmount > 0) {
+            YSData ysd = this.ysdatas.get(p.getName());
+            if (ysd != null) {
+                ysd.deposit(stickerKey, stickerAmount);
+            }
+        }
+        StringBuilder msg = new StringBuilder("§3精灵合成 §f|| §a获得委托奖励: ");
+        boolean any = false;
+        if (money > 0) {
+            msg.append("§f").append(money).append(" §a金币");
+            any = true;
+        }
+        if (sticker != null && stickerAmount > 0) {
+            msg.append(any ? " §a+ " : "").append(stickerAmount).append(" 个").append(sticker.getDisplay());
+        }
+        p.sendMessage(msg.toString());
+    }
+
+    // ================================================================ 第四轮新增：合成图鉴
+
+    public boolean isDexEnabled() {
+        return this.getConfig().getBoolean("Compound.dex.enabled", DEFAULT_DEX_ENABLED);
+    }
+
+    /** 一个图鉴里程碑档位及其奖励。 */
+    public static class DexReward {
+        public final int milestone;
+        public final int money;
+        public final String sticker;
+        public final int stickerAmount;
+
+        DexReward(int milestone, int money, String sticker, int stickerAmount) {
+            this.milestone = milestone;
+            this.money = money;
+            this.sticker = sticker;
+            this.stickerAmount = stickerAmount;
+        }
+    }
+
+    /** 全部图鉴里程碑（按门槛升序）。 */
+    public List<DexReward> getDexRewards() {
+        List<DexReward> out = new ArrayList<DexReward>();
+        org.bukkit.configuration.ConfigurationSection section =
+                this.getConfig().getConfigurationSection("Compound.dex.rewards");
+        // 修复：这里原来的判定是 `section == null`，挡不住「磁盘上的 config.yml 早于本功能」的情况。
+        // Bukkit 的 MemorySection#getConfigurationSection 在「本段没有这个键、但 jar 内置 config.yml 有」时，
+        // 会走 get(path, getDefault(path)) 拿到内置段，再 createSection(path) 造一个**空段**返回 ——
+        // 非 null、但 getKeys() 为空。于是奖励表静默变空：图鉴界面「奖励档位: 0 个」，
+        // 里程碑格子全成灰玻璃，玩家点了没反应。（字节码已逐条核对：getDefault → get → createSection）
+        // 所以必须把「空段」也当成「没配」，否则老服的默认奖励永远读不出来。
+        if (section == null || section.getKeys(false).isEmpty()) {
+            for (int i = 0; i < DEFAULT_DEX_MILESTONES.length; i++) {
+                out.add(new DexReward(DEFAULT_DEX_MILESTONES[i], DEFAULT_DEX_MONEY[i],
+                        DEFAULT_DEX_STICKERS[i], DEFAULT_DEX_STICKER_AMOUNTS[i]));
+            }
+        } else {
+            for (String key : section.getKeys(false)) {
+                int milestone = parseInt(key, -1);
+                if (milestone <= 0) {
+                    continue;
+                }
+                Object rawMoney = section.get(key + ".money");
+                Object rawSticker = section.get(key + ".sticker-type");
+                Object rawStickerAmount = section.get(key + ".sticker-amount");
+                out.add(new DexReward(milestone,
+                        rawMoney == null ? 0 : intOf(rawMoney, 0),
+                        rawSticker == null ? null : String.valueOf(rawSticker),
+                        rawStickerAmount == null ? 1 : intOf(rawStickerAmount, 1)));
+            }
+            Collections.sort(out, new java.util.Comparator<DexReward>() {
+                @Override
+                public int compare(DexReward a, DexReward b) {
+                    return Integer.compare(a.milestone, b.milestone);
+                }
+            });
+        }
+        return out;
+    }
+
+    /** 记录一次合成产出（图鉴按「产出过的种族」收录）。 */
+    public void recordDex(Player p, String species) {
+        if (!this.isDexEnabled() || this.storage == null || species == null || species.isEmpty()) {
+            return;
+        }
+        this.storage.dexAdd(p.getUniqueId(), p.getName(), species);
+    }
+
+    /** 图鉴里已收录的种族数。 */
+    public int getDexSpeciesCount(Player p) {
+        return this.storage == null ? 0 : this.storage.dexSpeciesCount(p.getUniqueId());
+    }
+
+    /** 图鉴里某个种族的产出次数。 */
+    public int getDexAmount(Player p, String species) {
+        return this.storage == null ? 0 : this.storage.dexAmount(p.getUniqueId(), species);
+    }
+
+    /** 图鉴内容快照（种族 -> 产出次数）。 */
+    public Map<String, Integer> getDexAll(Player p) {
+        return this.storage == null
+                ? new LinkedHashMap<String, Integer>() : this.storage.dexAll(p.getUniqueId());
+    }
+
+    /** 已领取的图鉴里程碑。 */
+    public Set<Integer> getDexClaimed(Player p) {
+        return this.storage == null
+                ? new java.util.HashSet<Integer>() : this.storage.dexClaimed(p.getUniqueId());
+    }
+
+    /**
+     * 领取一个图鉴里程碑奖励。
+     *
+     * @return 是否领取成功
+     */
+    public boolean claimDexMilestone(Player p, int milestone) {
+        if (this.storage == null) {
+            p.sendMessage("§3精灵合成 §f|| §c存储尚未就绪, 无法领取!");
+            return false;
+        }
+        int have = this.getDexSpeciesCount(p);
+        if (have < milestone) {
+            p.sendMessage("§3精灵合成 §f|| §c图鉴还差 §f" + (milestone - have)
+                    + " §c种精灵才能领取这个奖励!");
+            return false;
+        }
+        // 判重交给数据库主键：玩家连点两下时两次调用在同一 tick 内依次执行，
+        // 「先查后写」会被绕过，INSERT OR IGNORE 不会。
+        if (!this.storage.dexClaim(p.getUniqueId(), p.getName(), milestone)) {
+            p.sendMessage("§3精灵合成 §f|| §c这个图鉴奖励已经领取过了!");
+            return false;
+        }
+        for (DexReward reward : this.getDexRewards()) {
+            if (reward.milestone != milestone) {
+                continue;
+            }
+            if (reward.money > 0 && this.economy != null) {
+                this.economy.depositPlayer((OfflinePlayer) p, (double) reward.money);
+            }
+            StickerType sticker = this.getStickerType(reward.sticker);
+            if (sticker != null && reward.stickerAmount > 0) {
+                YSData ysd = this.ysdatas.get(p.getName());
+                if (ysd != null) {
+                    ysd.deposit(reward.sticker, reward.stickerAmount);
+                }
+            }
+            StringBuilder msg = new StringBuilder("§3精灵合成 §f|| §a图鉴奖励已领取: ");
+            if (reward.money > 0) {
+                msg.append("§f").append(reward.money).append(" §a金币");
+            }
+            if (sticker != null && reward.stickerAmount > 0) {
+                msg.append(reward.money > 0 ? " §a+ " : "")
+                        .append(reward.stickerAmount).append(" 个").append(sticker.getDisplay());
+            }
+            p.sendMessage(msg.toString());
+            break;
+        }
+        return true;
+    }
+
+    // ================================================================ 第四轮新增：粘剂扩展字段
+
+    /** 该粘剂是否带「保护符」效果（合成失败时保留材料）。 */
+    public boolean isStickerProtect(String key) {
+        StickerType type = this.getStickerType(key);
+        return type != null && type.isProtect();
+    }
+
+    /** 该粘剂的定向产出池；没有定向时返回空列表。 */
+    public List<String> getStickerPool(String key) {
+        StickerType type = this.getStickerType(key);
+        return type == null ? Collections.<String>emptyList() : type.getPool();
+    }
+
+    // ================================================================ 第四轮新增：界面动作
+    // 这三个方法都在界面里被点击触发，统一放在主类里 —— 它们要碰经济、要碰 SQLite、
+    // 要写聊天栏提示，放在 PlayerData（只该管渲染与会话）里会让那个类变成第二个上帝类。
+
+    /** 洗练用的随机源。界面与合成都在主线程，单实例足够。 */
+    private final Random random = new Random();
+
+    /**
+     * 分解一只精灵，返还粘剂与金币。
+     *
+     * <p>顺序很关键：<b>先删精灵，再发东西</b>。反过来的话，发奖过程中一旦抛异常，
+     * 玩家就白拿了一次返还而精灵还在。</p>
+     *
+     * @return 是否分解成功
+     */
+    public boolean salvagePokemon(Player p, int partySlot) {
+        if (!this.isSalvageEnabled()) {
+            p.sendMessage("§3精灵合成 §f|| §c分解回收功能已关闭!");
+            return false;
+        }
+        PlayerPartyStorage pps = Pixelmon.storageManager.getParty(p.getUniqueId());
+        Pokemon pokemon = pps == null ? null : pps.get(partySlot);
+        if (pokemon == null) {
+            p.sendMessage("§3精灵合成 §f|| §c所选精灵已不存在!");
+            return false;
+        }
+        if (pokemon.isEgg()) {
+            p.sendMessage("§3精灵合成 §f|| §c精灵蛋无法分解!");
+            return false;
+        }
+        int star = new PokeStarAPI().getPokemonStar(pokemon.getSpecies().name());
+        if (star < 1) {
+            p.sendMessage("§3精灵合成 §f|| §c该精灵未被星级系统收录, 无法分解!");
+            return false;
+        }
+        int money = this.getSalvageMoney(star);
+        int stickerAmount = this.getSalvageSticker(star);
+        StickerType sticker = this.getStickerType(this.getSalvageStickerType());
+
+        pps.set(partySlot, null);
+
+        if (money > 0 && this.economy != null) {
+            this.economy.depositPlayer((OfflinePlayer) p, (double) money);
+        }
+        int granted = 0;
+        if (sticker != null && stickerAmount > 0) {
+            YSData ysd = this.ysdatas.get(p.getName());
+            if (ysd != null) {
+                ysd.deposit(sticker.getKey(), stickerAmount);
+                granted = stickerAmount;
+            }
+        }
+
+        StringBuilder msg = new StringBuilder("§3精灵合成 §f|| §a分解完成, 获得 §f")
+                .append(money).append(" §a金币");
+        if (granted > 0) {
+            msg.append(" §a+ §f").append(granted).append(" §a个").append(sticker.getDisplay());
+        }
+        msg.append("！");
+        p.sendMessage(msg.toString());
+        this.playFeedback(p, "success");
+        this.addQuestProgress(p, QuestType.SALVAGE, 1);
+        return true;
+    }
+
+    /**
+     * 洗练精灵的某一项属性。
+     *
+     * @param attr 0~5 = 六项个体值，{@code ATTR_NATURE} = 性格，{@code ATTR_ABILITY} = 特性
+     * @return 是否洗练成功
+     */
+    public boolean rerollAttr(Player p, int partySlot, int attr) {
+        if (!this.isRerollEnabled()) {
+            p.sendMessage("§3精灵合成 §f|| §c洗练功能已关闭!");
+            return false;
+        }
+        PlayerPartyStorage pps = Pixelmon.storageManager.getParty(p.getUniqueId());
+        Pokemon pokemon = pps == null ? null : pps.get(partySlot);
+        if (pokemon == null) {
+            p.sendMessage("§3精灵合成 §f|| §c所选精灵已不存在!");
+            return false;
+        }
+
+        int price = this.getRerollPrice();
+        StickerType sticker = this.getStickerType(this.getRerollStickerType());
+        int stickerAmount = sticker == null ? 0 : Math.max(this.getRerollStickerAmount(), 0);
+        YSData ysd = this.ysdatas.get(p.getName());
+        if (ysd == null) {
+            p.sendMessage("§3精灵合成 §f|| §c粘剂数据尚未加载, 请重新进服后再试!");
+            return false;
+        }
+        if (price > 0) {
+            if (this.economy == null) {
+                p.sendMessage("§3精灵合成 §f|| §c服务器经济服务不可用, 暂时无法洗练!");
+                return false;
+            }
+            if (this.economy.getBalance((OfflinePlayer) p) < (double) price) {
+                p.sendMessage("§3精灵合成 §f|| §c你没有足够的金币！");
+                return false;
+            }
+        }
+        if (stickerAmount > 0 && ysd.getAmount(sticker.getKey()) < stickerAmount) {
+            p.sendMessage("§3精灵合成 §f|| §c你没有足够的" + sticker.getInsufficient());
+            return false;
+        }
+
+        // 先扣费再洗炼，洗炼失败时退款 —— 顺序反过来会出现「洗成功了但扣费失败」，
+        // 那种情况没法回滚（属性已经被改掉了），玩家等于白拿一次洗练。
+        if (price > 0) {
+            this.economy.withdrawPlayer((OfflinePlayer) p, (double) price);
+        }
+        if (stickerAmount > 0) {
+            ysd.withdraw(sticker.getKey(), stickerAmount);
+        }
+
+        String detail = null;
+        if (attr >= 0 && attr < PokemonAttr.IV_COUNT) {
+            int value = PokemonAttr.rerollIv(pokemon, attr, this.getRerollIvMin(), this.getRerollIvMax(),
+                    this.isRerollImproveOnly(), this.random);
+            if (value >= 0) {
+                detail = PokemonAttr.ivName(attr) + " §7-> §f" + value;
+            }
+        } else if (attr == PlayerData.ATTR_NATURE) {
+            String nature = PokemonAttr.rerollNature(pokemon, this.random);
+            if (nature != null) {
+                detail = "性格 §7-> §f" + nature;
+            }
+        } else if (attr == PlayerData.ATTR_ABILITY) {
+            String slot = PokemonAttr.rerollAbility(pokemon);
+            if (slot != null) {
+                detail = "特性 §7-> §f" + slot;
+            }
+        }
+
+        if (detail == null) {
+            // 洗练本身失败：把刚扣的费用原样退回去，不让玩家为一次没发生的事付费。
+            if (price > 0 && this.economy != null) {
+                this.economy.depositPlayer((OfflinePlayer) p, (double) price);
+            }
+            if (stickerAmount > 0) {
+                ysd.deposit(sticker.getKey(), stickerAmount);
+            }
+            p.sendMessage("§3精灵合成 §f|| §c洗练失败, 本次消耗已全额退还(可能是该精灵属性不可读)!");
+            return false;
+        }
+
+        p.sendMessage("§3精灵合成 §f|| §a洗练成功: " + detail + " §7(消耗 §f" + price + " §7金币"
+                + (stickerAmount > 0 ? " + " + stickerAmount + " 个" + sticker.getDisplay() : "") + "§7)");
+        this.playFeedback(p, "success");
+        return true;
+    }
+
+    /**
+     * 按配方合成粘剂。
+     *
+     * @param recipeIndex 配方下标（对应 {@link #getStickerRecipes()} 的顺序）
+     * @return 是否合成成功
+     */
+    public boolean craftSticker(Player p, int recipeIndex) {
+        if (!this.isStickerCraftEnabled()) {
+            p.sendMessage("§3精灵合成 §f|| §c粘剂合成功能已关闭!");
+            return false;
+        }
+        List<StickerRecipe> recipes = this.getStickerRecipes();
+        if (recipeIndex < 0 || recipeIndex >= recipes.size()) {
+            p.sendMessage("§3精灵合成 §f|| §c配方不存在!");
+            return false;
+        }
+        StickerRecipe recipe = recipes.get(recipeIndex);
+        StickerType from = this.getStickerType(recipe.getFrom());
+        StickerType to = this.getStickerType(recipe.getTo());
+        if (from == null || to == null) {
+            p.sendMessage("§3精灵合成 §f|| §c配方引用了不存在的粘剂类型, 请检查配置!");
+            return false;
+        }
+        YSData ysd = this.ysdatas.get(p.getName());
+        if (ysd == null) {
+            p.sendMessage("§3精灵合成 §f|| §c粘剂数据尚未加载, 请重新进服后再试!");
+            return false;
+        }
+        if (ysd.getAmount(from.getKey()) < recipe.getAmount()) {
+            p.sendMessage("§3精灵合成 §f|| §c你没有足够的" + from.getInsufficient());
+            return false;
+        }
+        if (recipe.getMoney() > 0) {
+            if (this.economy == null) {
+                p.sendMessage("§3精灵合成 §f|| §c服务器经济服务不可用, 暂时无法合成!");
+                return false;
+            }
+            if (this.economy.getBalance((OfflinePlayer) p) < (double) recipe.getMoney()) {
+                p.sendMessage("§3精灵合成 §f|| §c你没有足够的金币！");
+                return false;
+            }
+        }
+
+        ysd.withdraw(from.getKey(), recipe.getAmount());
+        if (recipe.getMoney() > 0) {
+            this.economy.withdrawPlayer((OfflinePlayer) p, (double) recipe.getMoney());
+        }
+        ysd.deposit(to.getKey(), recipe.getResult());
+
+        p.sendMessage("§3精灵合成 §f|| §a合成完成, 获得 §f" + recipe.getResult() + " §a个"
+                + stripLeadColor(to.getDisplay()) + " §7(消耗 §f" + recipe.getAmount() + " §7个"
+                + stripLeadColor(from.getDisplay()) + " §7+ §f" + recipe.getMoney() + " §7金币)");
+        this.playFeedback(p, "success");
+        this.addQuestProgress(p, QuestType.STICKER, 1);
+        return true;
+    }
+
     @Override
     public void onEnable() {
         pu = this;
@@ -1297,6 +2174,19 @@ public class PokeUtils extends JavaPlugin {
         if (args.length == 0) {
             sender.sendMessage("§a==============================================");
             sender.sendMessage("§6/pu §fcompound - §e打开合成界面");
+            sender.sendMessage("§6/pu §fquest - §e查看今日委托");
+            sender.sendMessage("§6/pu §fdex - §e查看合成图鉴");
+            // 这三个入口只有在对应功能开启时才出现在帮助里 —— 否则玩家点进去只会看到
+            // 「该功能已关闭」，等于把帮助信息变成噪音。
+            if (this.isSalvageEnabled()) {
+                sender.sendMessage("§6/pu §fsalvage - §e分解回收精灵（换回粘剂与金币）");
+            }
+            if (this.isRerollEnabled()) {
+                sender.sendMessage("§6/pu §freroll - §e洗练精灵的单项属性");
+            }
+            if (this.isStickerCraftEnabled()) {
+                sender.sendMessage("§6/pu §fcraft - §e用低阶粘剂合成高阶粘剂");
+            }
             sender.sendMessage("§6/pu §fhistory [玩家] [条数] - §e查看最近的合成记录");
             sender.sendMessage("§6/pu §fstats [玩家|all] - §e合成统计（成功率 / 消耗）");
             sender.sendMessage("§6/pu §ftop [count|star] - §e合成排行榜");
@@ -1307,6 +2197,7 @@ public class PokeUtils extends JavaPlugin {
                 sender.sendMessage("§6/pu §fdebug <玩家> - §e查看某个玩家的合成状态与成功率构成");
                 sender.sendMessage("§6/pu §fstorage - §e查看存储后端状态（缓存 / 落盘 / 熔断）");
                 sender.sendMessage("§6/pu §fmigrate <sqlite|mysql> [dry-run] - §e把数据整体搬到另一个后端");
+                sender.sendMessage("§6/pu §fquestreset <玩家> - §e清空某玩家今天的委托进度");
                 sender.sendMessage("§6/pu §freload - §e重载插件配置文件");
             }
             sender.sendMessage("§a==============================================");
@@ -1339,6 +2230,9 @@ public class PokeUtils extends JavaPlugin {
             this.invalidateStickerTypes();
             // 合成券定义同样是缓存过的，一并失效。
             this.invalidateVouchers();
+            // 第四轮新增的两处缓存同样要失效，否则改了配方 / 委托权重要重启才生效。
+            this.invalidateStickerRecipes();
+            this.invalidateQuestTypes();
             // 产出池可能被 PokeStar 的 stars.yml 改动影响，重载时再自检一次。
             this.checkStarPools();
             // 日志索引的上限（history.max-scan-lines）可能被改了，磁盘上的日志也可能
@@ -1374,6 +2268,19 @@ public class PokeUtils extends JavaPlugin {
             this.handleTopCommand(sender, args);
         } else if (args[0].equalsIgnoreCase("debug") && sender.hasPermission("pokeutils.admin")) {
             this.handleDebugCommand(sender, args);
+        } else if (args[0].equalsIgnoreCase("salvage") || args[0].equalsIgnoreCase("fenjie")) {
+            this.handleSalvageCommand(sender);
+        } else if (args[0].equalsIgnoreCase("reroll") || args[0].equalsIgnoreCase("xilian")) {
+            this.handleRerollCommand(sender);
+        } else if (args[0].equalsIgnoreCase("quest") || args[0].equalsIgnoreCase("daily")
+                || args[0].equalsIgnoreCase("weituo")) {
+            this.handleQuestCommand(sender);
+        } else if (args[0].equalsIgnoreCase("dex") || args[0].equalsIgnoreCase("tujian")) {
+            this.handleDexCommand(sender);
+        } else if (args[0].equalsIgnoreCase("craft") || args[0].equalsIgnoreCase("stickercraft")) {
+            this.handleCraftCommand(sender);
+        } else if (args[0].equalsIgnoreCase("questreset") && sender.hasPermission("pokeutils.admin")) {
+            this.handleQuestResetCommand(sender, args);
         } else if (args[0].equalsIgnoreCase("g") && sender.hasPermission("pokeutils.admin")) {
             this.handleStickerCommand(sender, args, true);
         } else if (args[0].equalsIgnoreCase("take") && sender.hasPermission("pokeutils.admin")) {
@@ -1386,6 +2293,143 @@ public class PokeUtils extends JavaPlugin {
             this.handleMigrateCommand(sender, args);
         }
         return false;
+    }
+
+    // ================================================================ 第四轮新增命令入口
+    // 这五个命令都遵循同一条设计：命令只负责「校验 + 打开界面」，真正的操作在界面上完成。
+    // 原因是它们全都要针对「队伍里的某一只精灵」做事，而玩家在聊天栏里没法直观地指认
+    // 「第几只」；用界面选就不会选错，也不需要额外记一串参数顺序。
+
+    /** {@code /pu salvage}：打开分解回收界面。 */
+    private void handleSalvageCommand(CommandSender sender) {
+        if (!this.isSalvageEnabled()) {
+            sender.sendMessage("§b精灵信息 §f// §c分解回收功能已关闭！");
+            return;
+        }
+        if (!(sender instanceof Player)) {
+            sender.sendMessage("§b精灵信息 §f// §c该指令只能由玩家执行！");
+            return;
+        }
+        Player p = (Player) sender;
+        PlayerData pd = this.playerdatas.get(p.getName());
+        if (pd == null) {
+            pd = new PlayerData();
+            this.playerdatas.put(p.getName(), pd);
+        }
+        this.playFeedback(p, "open");
+        pd.openPartyGui(p, PlayerData.PURPOSE_SALVAGE);
+    }
+
+    /** {@code /pu reroll}：打开洗练的精灵选择界面。 */
+    private void handleRerollCommand(CommandSender sender) {
+        if (!this.isRerollEnabled()) {
+            sender.sendMessage("§b精灵信息 §f// §c洗练功能已关闭！");
+            return;
+        }
+        if (!(sender instanceof Player)) {
+            sender.sendMessage("§b精灵信息 §f// §c该指令只能由玩家执行！");
+            return;
+        }
+        Player p = (Player) sender;
+        PlayerData pd = this.playerdatas.get(p.getName());
+        if (pd == null) {
+            pd = new PlayerData();
+            this.playerdatas.put(p.getName(), pd);
+        }
+        this.playFeedback(p, "open");
+        pd.openPartyGui(p, PlayerData.PURPOSE_REROLL);
+    }
+
+    /** {@code /pu quest}：打开每日委托界面。 */
+    private void handleQuestCommand(CommandSender sender) {
+        if (!this.isQuestEnabled()) {
+            sender.sendMessage("§b精灵信息 §f// §c每日委托功能已关闭！");
+            return;
+        }
+        if (!(sender instanceof Player)) {
+            sender.sendMessage("§b精灵信息 §f// §c该指令只能由玩家执行！");
+            return;
+        }
+        Player p = (Player) sender;
+        PlayerData pd = this.playerdatas.get(p.getName());
+        if (pd == null) {
+            pd = new PlayerData();
+            this.playerdatas.put(p.getName(), pd);
+        }
+        this.playFeedback(p, "open");
+        pd.openQuestGui(p);
+    }
+
+    /** {@code /pu dex}：打开合成图鉴。 */
+    private void handleDexCommand(CommandSender sender) {
+        if (!this.isDexEnabled()) {
+            sender.sendMessage("§b精灵信息 §f// §c合成图鉴功能已关闭！");
+            return;
+        }
+        if (!(sender instanceof Player)) {
+            sender.sendMessage("§b精灵信息 §f// §c该指令只能由玩家执行！");
+            return;
+        }
+        Player p = (Player) sender;
+        PlayerData pd = this.playerdatas.get(p.getName());
+        if (pd == null) {
+            pd = new PlayerData();
+            this.playerdatas.put(p.getName(), pd);
+        }
+        this.playFeedback(p, "open");
+        pd.openDexGui(p, 1);
+    }
+
+    /** {@code /pu craft}：打开粘剂合成界面。 */
+    private void handleCraftCommand(CommandSender sender) {
+        if (!this.isStickerCraftEnabled()) {
+            sender.sendMessage("§b精灵信息 §f// §c粘剂合成功能已关闭！");
+            return;
+        }
+        if (!(sender instanceof Player)) {
+            sender.sendMessage("§b精灵信息 §f// §c该指令只能由玩家执行！");
+            return;
+        }
+        Player p = (Player) sender;
+        PlayerData pd = this.playerdatas.get(p.getName());
+        if (pd == null) {
+            pd = new PlayerData();
+            this.playerdatas.put(p.getName(), pd);
+        }
+        this.playFeedback(p, "open");
+        pd.openStickerCraftGui(p);
+    }
+
+    /**
+     * {@code /pu questreset <玩家>}：清空某玩家「今天」的委托进度。
+     *
+     * <p>作用是给运营一个补救手段 —— 委托是当天固定的，玩家如果因为某次误操作
+     * （例如把要交付的精灵分解了）卡住，除了等第二天没有别的出路。</p>
+     */
+    private void handleQuestResetCommand(CommandSender sender, String[] args) {
+        if (args.length < 2) {
+            sender.sendMessage("§b精灵信息 §f// §c用法: /pu questreset <玩家>");
+            return;
+        }
+        if (this.storage == null) {
+            sender.sendMessage("§b精灵信息 §f// §c存储尚未就绪!");
+            return;
+        }
+        String name = args[1];
+        Player online = Bukkit.getPlayerExact(name);
+        UUID uuid = online != null ? online.getUniqueId() : this.storage.findUuidByName(name);
+        if (uuid == null) {
+            sender.sendMessage("§b精灵信息 §f// §c找不到该玩家（他可能从未进过本服）");
+            return;
+        }
+        String day = this.today();
+        for (QuestData quest : this.storage.getQuests(uuid, day)) {
+            this.storage.setQuestProgress(uuid, day, quest.getSlot(), 0);
+            this.storage.setQuestClaimed(uuid, day, quest.getSlot());
+            // 上面把 claimed 也置 1：否则重置进度后玩家可以立刻再刷一次奖励。
+            // 「重置」的语义是「这条作废」，不是「白送一次」。
+        }
+        sender.sendMessage("§b精灵信息 §f// §a已把 " + name + " 今天的委托全部作废。");
     }
 
     // ================================================================ 流水 / 统计 / 排查

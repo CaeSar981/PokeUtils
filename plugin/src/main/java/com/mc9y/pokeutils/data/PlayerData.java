@@ -73,6 +73,120 @@ public class PlayerData {
      */
     private boolean processing;
 
+    // ================================================================ 第四轮新增：子界面状态
+    //
+    // 为什么状态放在 PlayerData 而不是每次 openXxxGui 的参数里：这些界面之间会互相跳转
+    // （选择精灵 -> 确认分解 -> 回到选择），而 Bukkit 的 InventoryCloseEvent 只能拿到
+    // 「是谁、关了哪个界面」，拿不到「当初为什么打开它」。状态放在会话对象上是最省事
+    // 也最不容易错的做法。
+
+    /** 选择精灵界面的用途：分解 / 洗练 / 交付委托。 */
+    public static final int PURPOSE_SALVAGE = 1;
+    public static final int PURPOSE_REROLL = 2;
+    public static final int PURPOSE_SUBMIT = 3;
+
+    public static final String TITLE_MAIN = "§8精灵合成";
+    public static final String TITLE_INHERIT = "§8继承设置";
+    public static final String TITLE_PARTY_SALVAGE = "§8请选择要分解的精灵";
+    public static final String TITLE_PARTY_REROLL = "§8请选择要洗练的精灵";
+    public static final String TITLE_PARTY_SUBMIT = "§8请选择要交付的精灵";
+    public static final String TITLE_SALVAGE_CONFIRM = "§8确认分解";
+    public static final String TITLE_REROLL = "§8洗练面板";
+    public static final String TITLE_QUEST = "§8每日委托";
+    /** 图鉴标题带页码后缀，判定时用 {@code startsWith}。 */
+    public static final String TITLE_DEX = "§8合成图鉴: ";
+    public static final String TITLE_CRAFT = "§8粘剂合成";
+
+    /** 洗练面板上「性格」按钮的属性下标（0~5 是个体值）。 */
+    public static final int ATTR_NATURE = 6;
+    /** 洗练面板上「特性」按钮的属性下标。 */
+    public static final int ATTR_ABILITY = 7;
+
+    /** 当前「请选择精灵」界面的用途，0 表示没在选。 */
+    private int pendingPurpose;
+    /** 选中的队伍下标（分解确认 / 洗练面板要用它找回那只精灵）。 */
+    private int pendingPartySlot = -1;
+    /** 交付委托时，正在交付的是哪一条委托。 */
+    private int pendingQuestSlot = -1;
+    /** 继承左栏：是否继承父本 A 的性格（旧字段名沿用，语义见 openInheritGui）。 */
+    private boolean inheritNature;
+    private boolean inheritAbility;
+    private boolean inheritIv;
+    /** 继承来源：0 = 父本 A，1 = 父本 B，其他 = 两者随机取一。 */
+    private int inheritSource = 2;
+
+    public int getPendingPurpose() {
+        return this.pendingPurpose;
+    }
+
+    public void setPendingPurpose(int purpose) {
+        this.pendingPurpose = purpose;
+    }
+
+    public int getPendingPartySlot() {
+        return this.pendingPartySlot;
+    }
+
+    public void setPendingPartySlot(int slot) {
+        this.pendingPartySlot = slot;
+    }
+
+    public int getPendingQuestSlot() {
+        return this.pendingQuestSlot;
+    }
+
+    public void setPendingQuestSlot(int slot) {
+        this.pendingQuestSlot = slot;
+    }
+
+    public boolean isInheritNature() {
+        return this.inheritNature;
+    }
+
+    public boolean isInheritAbility() {
+        return this.inheritAbility;
+    }
+
+    public boolean isInheritIv() {
+        return this.inheritIv;
+    }
+
+    public int getInheritSource() {
+        return this.inheritSource;
+    }
+
+    public void toggleInheritNature() {
+        this.inheritNature = !this.inheritNature;
+    }
+
+    public void toggleInheritAbility() {
+        this.inheritAbility = !this.inheritAbility;
+    }
+
+    public void toggleInheritIv() {
+        this.inheritIv = !this.inheritIv;
+    }
+
+    /** 在 父本 A -> 父本 B -> 随机 之间循环。 */
+    public void cycleInheritSource() {
+        this.inheritSource = (this.inheritSource + 1) % 3;
+    }
+
+    /** 当前一共勾选了几项继承（受 config 的 max-picks 限制）。 */
+    public int getInheritPicks() {
+        int picks = 0;
+        if (this.inheritNature) {
+            picks++;
+        }
+        if (this.inheritAbility) {
+            picks++;
+        }
+        if (this.inheritIv) {
+            picks++;
+        }
+        return picks;
+    }
+
     public boolean isSelect() {
         return this.select;
     }
@@ -207,14 +321,16 @@ public class PlayerData {
     public void openGui(Player p) {
         this.checkJL(p);
 
-        Inventory inv = Bukkit.createInventory(null, 45, "§8精灵合成");
+        Inventory inv = Bukkit.createInventory(null, 45, TITLE_MAIN);
 
         ItemStack fg = new ItemStack(Material.STAINED_GLASS_PANE, 1, (short) 15);
         ItemMeta fgim = fg.getItemMeta();
         fgim.setDisplayName("§a");
         fg.setItemMeta(fgim);
-        // 槽 26 留出来放「产出预览」按钮（见下方），故不在此处铺灰玻璃。
-        int[] fgslots = new int[]{0, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 17, 20, 21, 22, 23, 24, 25, 27, 29, 30, 31, 33, 34, 35, 36, 38, 39, 40, 41, 42, 43, 44};
+        // 槽 20~25 留出来做「功能入口」一排（继承 / 分解 / 洗练 / 粘剂合成 / 委托 / 图鉴），
+        // 槽 26 留给「产出预览」按钮，故不在此处铺灰玻璃。
+        // 外框与右侧分隔条保持原样 —— 新增入口只占用了原来纯装饰的一行中间格。
+        int[] fgslots = new int[]{0, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 17, 27, 29, 30, 31, 33, 34, 35, 36, 38, 39, 40, 41, 42, 43, 44};
         for (int i : fgslots) {
             inv.setItem(i, fg);
         }
@@ -330,6 +446,50 @@ public class PlayerData {
             preview.setItemMeta(previewim);
             inv.setItem(26, preview);
         }
+
+        // ================================================================
+        //  第四轮新增：功能入口一排（槽 20~25）
+        // ----------------------------------------------------------------
+        //  位置说明：这一排原本是 6 格纯装饰的灰玻璃。放在这里而不是最下面一行，
+        //  是为了不动外框、也不动既有的槽位断言 —— 新增入口全部是「原来什么都没画」的格子。
+        //  按钮始终渲染（即使对应功能被 config 关掉），点下去会提示「该功能已关闭」——
+        //  保持布局稳定比省一个格子更重要，玩家也不会因为开关变化而「找不到按钮」。
+        // ================================================================
+        String pickInfo = this.getInheritPicks() + " / "
+                + PokeUtils.getInstance().getInheritMaxPicks();
+        inv.setItem(20, button(Material.NETHER_STAR, "§b继承设置 §f(§e点击配置§f)",
+                "§b",
+                "§7 §k||§e 让产物继承父本的属性",
+                "§7 §k||§e 已选: §f" + pickInfo,
+                "§d"));
+
+        inv.setItem(21, button(Material.SLIME_BALL, "§b分解回收 §f(§e点击打开§f)",
+                "§b",
+                "§7 §k||§e 把多余的精灵换成粘剂与金币",
+                "§7 §k||§e 返还比例按精灵星级计算",
+                "§d"));
+
+        inv.setItem(22, button(Material.MAGMA_CREAM, "§b属性洗练 §f(§e点击打开§f)",
+                "§b",
+                "§7 §k||§e 重掷精灵的单项属性",
+                "§7 §k||§e 消耗金币与粘剂",
+                "§d"));
+
+        inv.setItem(23, button(Material.DRAGONS_BREATH, "§b粘剂合成 §f(§e点击打开§f)",
+                "§b",
+                "§7 §k||§e 用低阶粘剂合成高阶粘剂",
+                "§d"));
+
+        inv.setItem(24, button(Material.PAPER, "§b每日委托 §f(§e点击查看§f)",
+                "§b",
+                "§7 §k||§e 每天刷新的一组小目标",
+                "§7 §k||§e 完成后可领取金币与粘剂",
+                "§d"));
+
+        inv.setItem(25, button(Material.BOOK_AND_QUILL, "§b合成图鉴 §f(§e点击查看§f)",
+                "§b",
+                "§7 §k||§e 记录你合成产出过的每一只精灵",
+                "§d"));
 
         int[] pzslots = new int[]{12, 14};
         for (int i : pzslots) {
@@ -772,5 +932,584 @@ public class PlayerData {
         // 新增（经济）：权限组加成。它与材料无关，但「总成功率」是三部分相加，
         // 所以必须和基础/粘剂一起算出来，否则界面上的总成功率会对不上实际判定值。
         this.vipBonus = PokeUtils.getInstance().getGroupRateBonus(p);
+    }
+
+    // ==================================================================
+    //  第四轮新增：子界面
+    // ------------------------------------------------------------------
+    //  统一遵循本插件既有的「子界面」协议，这一点必须说清楚，否则很容易改坏：
+    //    · 进入子界面之前先 this.select = true；
+    //    · 然后 p.closeInventory() 再 p.openInventory(inv)（或延后一 tick）。
+    //  这样主界面关闭时 onInventoryClose 的两条分支都不会命中（一条要求 !isSelect、
+    //  另一条要求标题是子界面），会话因此不会被误删；等子界面真的被关掉时，
+    //  第二条分支会把玩家送回合成主界面，而不是丢在一个空屏上。
+    // ==================================================================
+
+    private static ItemStack greyPane() {
+        ItemStack pane = new ItemStack(Material.STAINED_GLASS_PANE, 1, (short) 15);
+        ItemMeta meta = pane.getItemMeta();
+        meta.setDisplayName("§a");
+        pane.setItemMeta(meta);
+        return pane;
+    }
+
+    private static ItemStack button(Material material, String name, String... lore) {
+        ItemStack item = new ItemStack(material, 1);
+        ItemMeta meta = item.getItemMeta();
+        meta.setDisplayName(name);
+        if (lore != null && lore.length > 0) {
+            List<String> lines = new ArrayList<String>();
+            for (String line : lore) {
+                lines.add(line);
+            }
+            meta.setLore(lines);
+        }
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private static String onOff(boolean value) {
+        return value ? "§a已开启" : "§c未开启";
+    }
+
+    private String sourceName() {
+        return this.inheritSource == 0 ? "§f父本 A" : (this.inheritSource == 1 ? "§f父本 B" : "§f随机");
+    }
+
+    /**
+     * 打开「继承设置」界面。
+     *
+     * <p>三项开关（性格 / 特性 / 个体值）加一个来源选择器。受 {@code Compound.inherit.max-picks}
+     * 限制：默认 1 是刻意的 —— 多选会让「选哪个」这个决策消失，产物也容易强到破坏平衡。</p>
+     *
+     * <p>闪光不在这里：它不是「继承」而是「父本闪光带来的概率加成」，由两只父本自动决定，
+     * 没有可选空间。界面上用一行说明文字讲清楚，玩家才不会以为漏了一个开关。</p>
+     */
+    public void openInheritGui(Player p) {
+        this.select = true;
+        PokeUtils plugin = PokeUtils.getInstance();
+        Inventory inv = Bukkit.createInventory(null, 27, TITLE_INHERIT);
+        ItemStack pane = greyPane();
+        for (int i = 0; i < 27; i++) {
+            inv.setItem(i, pane);
+        }
+
+        int max = plugin.getInheritMaxPicks();
+        // 这里不要在数字前再补一个 §f：下面的文案已经写了「当前已选: §f」，
+        // 补了就会渲染成 §f§f0（颜色码重复），肉眼看不出，断言里却对不上。
+        String picked = this.getInheritPicks() + " §7/ §f" + max;
+        String ivRange = "§f" + plugin.getInheritIvMinPercent() + "%~" + plugin.getInheritIvMaxPercent() + "%";
+        String shinyRange = "§f单只 +" + plugin.getInheritShinySingleBonus()
+                + "% §7/ §f两只 +" + plugin.getInheritShinyDoubleBonus() + "%";
+
+        inv.setItem(10, button(Material.BOOK, "§e性格继承 " + onOff(this.inheritNature),
+                "§b",
+                "§7 §k||§e 产物沿用父本的性格",
+                "§7 §k||§7 性格影响两项能力的增减",
+                "§d"));
+        inv.setItem(12, button(Material.BLAZE_POWDER, "§e特性继承 " + onOff(this.inheritAbility),
+                "§b",
+                "§7 §k||§e 产物沿用父本的特性槽位",
+                "§7 §k||§7 按槽位继承而不是按名字 ——",
+                "§7 §k||§7 产物是另一个种族, 特性名通常不通用",
+                "§d"));
+        inv.setItem(14, button(Material.EXP_BOTTLE, "§e个体值继承 " + onOff(this.inheritIv),
+                "§b",
+                "§7 §k||§e 产物各项个体值取两只父本的区间",
+                "§7 §k||§e 取点范围: " + ivRange,
+                "§7 §k||§7 用高个体材料会明显更划算",
+                "§d"));
+        inv.setItem(16, button(Material.COMPASS, "§e继承来源: " + this.sourceName(),
+                "§b",
+                "§7 §k||§e 从哪一只父本取值",
+                "§7 §k||§7 点击在 父本A / 父本B / 随机 之间切换",
+                "§7 §k||§7 父本 A = 上方材料槽, 父本 B = 下方材料槽",
+                "§d"));
+        inv.setItem(22, button(Material.BARRIER, "§c返回合成界面",
+                "§b",
+                "§7 §k||§e 当前已选: §f" + picked,
+                "§7 §k||§e 闪光加成(自动): " + shinyRange,
+                "§d"));
+
+        p.closeInventory();
+        p.openInventory(inv);
+    }
+
+    /**
+     * 打开「请选择精灵」界面（分解 / 洗练 / 交付委托共用）。
+     *
+     * <p>与 {@link #openSelectPokemonGui} 的区别是用途可配，因此标题也不同。
+     * 三个用途都用同一套队伍槽位（11/13/15/29/31/33 对应队伍 0~5），
+     * 保持与合成选材界面一致的肌肉记忆。</p>
+     */
+    public void openPartyGui(Player p, int purpose) {
+        this.select = true;
+        this.pendingPurpose = purpose;
+        String title = purpose == PURPOSE_SALVAGE ? TITLE_PARTY_SALVAGE
+                : (purpose == PURPOSE_REROLL ? TITLE_PARTY_REROLL : TITLE_PARTY_SUBMIT);
+        Inventory inv = Bukkit.createInventory(null, 45, title);
+
+        ItemStack pane = greyPane();
+        for (int i = 0; i < 45; i++) {
+            inv.setItem(i, pane);
+        }
+        int[] slots = new int[]{11, 13, 15, 29, 31, 33};
+        ItemStack none = button(Material.BARRIER, "§c无精灵");
+        for (int i : slots) {
+            inv.setItem(i, none);
+        }
+        inv.setItem(40, button(Material.ARROW, "§c返回合成界面"));
+
+        PlayerPartyStorage pps = Pixelmon.storageManager.getParty(p.getUniqueId());
+        PokeStarAPI psa = new PokeStarAPI();
+        PokeUtils plugin = PokeUtils.getInstance();
+        for (int i = 0; i < 6 && i < slots.length; i++) {
+            Pokemon pokemon = pps == null ? null : pps.get(i);
+            if (pokemon == null) {
+                continue;
+            }
+            ItemStack item;
+            try {
+                item = Blank038API.getPokemonAPI().getSpriteHelper().getSpriteItem(pokemon);
+            } catch (Throwable t) {
+                item = null;
+            }
+            if (item == null) {
+                item = new ItemStack(Material.PAPER);
+            }
+            ItemMeta im = item.getItemMeta();
+            if (im == null) {
+                continue;
+            }
+            int star = psa.getPokemonStar(pokemon.getSpecies().name());
+            im.setDisplayName("§f" + PokemonUtil.getPokemonName(pokemon)
+                    + " (" + psa.getPokeShowName(star) + "§f)");
+            List<String> lore = new ArrayList<String>();
+            lore.add("§b");
+            int[] ivs = PokemonAttr.readIvs(pokemon);
+            if (ivs != null) {
+                int total = 0;
+                for (int value : ivs) {
+                    total += value;
+                }
+                lore.add("§7 §k||§e 个体值合计: §f" + total + " §7/ §f186");
+            }
+            lore.add("§7 §k||§e 性格: §f" + PokemonAttr.natureName(pokemon.getNature()));
+            lore.add("§7 §k||§e 特性: §f" + PokemonAttr.abilityName(pokemon));
+            lore.add("§7 §k||§e 特性槽: §f" + PokemonAttr.abilitySlot(pokemon));
+            if (purpose == PURPOSE_SALVAGE) {
+                int refundSticker = plugin.getSalvageSticker(star);
+                StickerType refundType = plugin.getStickerType(plugin.getSalvageStickerType());
+                lore.add("§3");
+                lore.add("§7 §k||§c 分解后该精灵将永久消失");
+                lore.add("§7 §k||§e 返还: §f" + plugin.getSalvageMoney(star) + " §e金币"
+                        + (refundType != null && refundSticker > 0
+                        ? " §a+ §f" + refundSticker + " 个" + refundType.getDisplay() : ""));
+            } else if (purpose == PURPOSE_REROLL) {
+                StickerType cost = plugin.getStickerType(plugin.getRerollStickerType());
+                lore.add("§3");
+                lore.add("§7 §k||§e 每次洗练消耗: §f" + plugin.getRerollPrice() + " §e金币"
+                        + (cost != null && plugin.getRerollStickerAmount() > 0
+                        ? " §a+ §f" + plugin.getRerollStickerAmount() + " 个" + cost.getDisplay() : ""));
+            } else if (purpose == PURPOSE_SUBMIT) {
+                int needStar = 0;
+                for (QuestData quest : plugin.getQuestBoard(p)) {
+                    if (quest.getSlot() == this.pendingQuestSlot && QuestType.SUBMIT.equals(quest.getType())) {
+                        needStar = quest.getStar();
+                    }
+                }
+                lore.add("§3");
+                if (needStar > 0 && star < needStar) {
+                    lore.add("§7 §k||§c 星级不足（需要 " + PokeUtils.starName(needStar) + " 及以上）");
+                } else {
+                    lore.add("§7 §k||§e 点击交给系统, 该精灵将永久消失");
+                }
+            }
+            lore.add("§d");
+            im.setLore(lore);
+            item.setItemMeta(im);
+            inv.setItem(slots[i], item);
+        }
+
+        p.closeInventory();
+        p.openInventory(inv);
+    }
+
+    /** 打开分解确认界面（把「确认」与「取消」分开，避免手滑一键分解掉主力）。 */
+    public void openSalvageConfirmGui(Player p) {
+        this.select = true;
+        PokeUtils plugin = PokeUtils.getInstance();
+        PlayerPartyStorage pps = Pixelmon.storageManager.getParty(p.getUniqueId());
+        Pokemon pokemon = pps == null || this.pendingPartySlot < 0 ? null : pps.get(this.pendingPartySlot);
+        if (pokemon == null) {
+            p.sendMessage("§3精灵合成 §f|| §c所选精灵已不存在!");
+            this.pendingPartySlot = -1;
+            this.openGui(p);
+            return;
+        }
+
+        Inventory inv = Bukkit.createInventory(null, 27, TITLE_SALVAGE_CONFIRM);
+        ItemStack pane = greyPane();
+        for (int i = 0; i < 27; i++) {
+            inv.setItem(i, pane);
+        }
+
+        int star = new PokeStarAPI().getPokemonStar(pokemon.getSpecies().name());
+        int refundSticker = plugin.getSalvageSticker(star);
+        StickerType refundType = plugin.getStickerType(plugin.getSalvageStickerType());
+
+        ItemStack item;
+        try {
+            item = Blank038API.getPokemonAPI().getSpriteHelper().getSpriteItem(pokemon);
+        } catch (Throwable t) {
+            item = null;
+        }
+        if (item == null) {
+            item = new ItemStack(Material.PAPER);
+        }
+        ItemMeta im = item.getItemMeta();
+        if (im != null) {
+            im.setDisplayName("§f" + PokemonUtil.getPokemonName(pokemon)
+                    + " (" + new PokeStarAPI().getPokeShowName(star) + "§f)");
+            im.setLore(java.util.Arrays.asList("§b", "§7 §k||§e 即将分解的就是这一只", "§d"));
+            item.setItemMeta(im);
+        }
+        inv.setItem(13, item);
+
+        inv.setItem(11, buttonData(Material.STAINED_GLASS_PANE, "§a确认分解", (short) 5,
+                "§b",
+                "§7 §k||§e 返还: §f" + plugin.getSalvageMoney(star) + " §e金币"
+                        + (refundType != null && refundSticker > 0
+                        ? " §a+ §f" + refundSticker + " 个" + refundType.getDisplay() : ""),
+                "§7 §k||§c 该操作不可撤销",
+                "§d"));
+        inv.setItem(15, buttonData(Material.STAINED_GLASS_PANE, "§c取消", (short) 14,
+                "§b",
+                "§7 §k||§e 放弃分解, 回到选择界面",
+                "§d"));
+        inv.setItem(22, button(Material.BARRIER, "§c返回合成界面"));
+
+        p.closeInventory();
+        p.openInventory(inv);
+    }
+
+    /** 带数据值的染色玻璃按钮（确认 / 取消用）。刻意与 {@link #button} 分成两个名字 —— 
+     *  只差一个 short 参数的重载极易被编译器挑错，也会让读代码的人看不出区别。 */
+    private static ItemStack buttonData(Material material, String name, short data, String... lore) {
+        ItemStack item = new ItemStack(material, 1, data);
+        ItemMeta meta = item.getItemMeta();
+        meta.setDisplayName(name);
+        List<String> lines = new ArrayList<String>();
+        for (String line : lore) {
+            lines.add(line);
+        }
+        meta.setLore(lines);
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    /**
+     * 打开洗练面板。
+     *
+     * <p>八个按钮：六项个体值 + 性格 + 特性。每项都显示当前值，玩家不用去别处对照。</p>
+     */
+    public void openRerollGui(Player p) {
+        this.select = true;
+        PokeUtils plugin = PokeUtils.getInstance();
+        PlayerPartyStorage pps = Pixelmon.storageManager.getParty(p.getUniqueId());
+        Pokemon pokemon = pps == null || this.pendingPartySlot < 0 ? null : pps.get(this.pendingPartySlot);
+        if (pokemon == null) {
+            p.sendMessage("§3精灵合成 §f|| §c所选精灵已不存在!");
+            this.pendingPartySlot = -1;
+            this.openGui(p);
+            return;
+        }
+
+        Inventory inv = Bukkit.createInventory(null, 54, TITLE_REROLL);
+        ItemStack pane = greyPane();
+        for (int i = 0; i < 54; i++) {
+            inv.setItem(i, pane);
+        }
+
+        int[] ivs = PokemonAttr.readIvs(pokemon);
+        Material[] icons = {Material.REDSTONE, Material.IRON_SWORD, Material.IRON_CHESTPLATE,
+            Material.BLAZE_ROD, Material.SHIELD, Material.FEATHER};
+        for (int i = 0; i < PokemonAttr.IV_COUNT; i++) {
+            int current = ivs == null ? -1 : ivs[i];
+            inv.setItem(10 + i, button(icons[i], "§e洗练 §f" + PokemonAttr.ivName(i),
+                    "§b",
+                    "§7 §k||§e 当前值: §f" + (current < 0 ? "读取失败" : String.valueOf(current)) + " §7/ §f31",
+                    "§7 §k||§e 洗练范围: §f" + plugin.getRerollIvMin() + " ~ " + plugin.getRerollIvMax(),
+                    "§7 §k||§e 模式: §f" + (plugin.isRerollImproveOnly() ? "只升不降" : "完全重掷"),
+                    "§7 §k||§e 点击洗练这一项",
+                    "§d"));
+        }
+        inv.setItem(16, button(Material.NETHER_STAR, "§e洗练 §f性格",
+                "§b",
+                "§7 §k||§e 当前: §f" + PokemonAttr.natureName(pokemon.getNature()),
+                "§7 §k||§e 洗练结果必定与当前不同",
+                "§d"));
+        inv.setItem(17, button(Material.GHAST_TEAR, "§e洗练 §f特性",
+                "§b",
+                "§7 §k||§e 当前: §f" + PokemonAttr.abilityName(pokemon)
+                        + " §7(槽 §f" + PokemonAttr.abilitySlot(pokemon) + "§7)",
+                "§7 §k||§e 在该精灵实际拥有的特性之间切换",
+                "§d"));
+
+        StickerType cost = plugin.getStickerType(plugin.getRerollStickerType());
+        ItemStack head;
+        try {
+            head = Blank038API.getPokemonAPI().getSpriteHelper().getSpriteItem(pokemon);
+        } catch (Throwable t) {
+            head = null;
+        }
+        if (head == null) {
+            head = new ItemStack(Material.PAPER);
+        }
+        ItemMeta headMeta = head.getItemMeta();
+        if (headMeta != null) {
+            headMeta.setDisplayName("§f" + PokemonUtil.getPokemonName(pokemon));
+            List<String> lore = new ArrayList<String>();
+            lore.add("§b");
+            int total = 0;
+            if (ivs != null) {
+                for (int value : ivs) {
+                    total += value;
+                }
+            }
+            lore.add("§7 §k||§e 个体值合计: §f" + total + " §7/ §f186");
+            lore.add("§7 §k||§e 每次洗练消耗: §f" + plugin.getRerollPrice() + " §e金币"
+                    + (cost != null && plugin.getRerollStickerAmount() > 0
+                    ? " §a+ §f" + plugin.getRerollStickerAmount() + " 个" + cost.getDisplay() : ""));
+            lore.add("§d");
+            headMeta.setLore(lore);
+            head.setItemMeta(headMeta);
+        }
+        inv.setItem(22, head);
+
+        inv.setItem(40, button(Material.BARRIER, "§c返回合成界面"));
+
+        p.closeInventory();
+        p.openInventory(inv);
+    }
+
+    /** 打开每日委托界面。 */
+    public void openQuestGui(Player p) {
+        this.select = true;
+        PokeUtils plugin = PokeUtils.getInstance();
+        Inventory inv = Bukkit.createInventory(null, 27, TITLE_QUEST);
+        ItemStack pane = greyPane();
+        for (int i = 0; i < 27; i++) {
+            inv.setItem(i, pane);
+        }
+
+        List<QuestData> quests = plugin.getQuestBoard(p);
+        int money = plugin.getQuestRewardMoney();
+        StickerType reward = plugin.getStickerType(plugin.getQuestRewardSticker());
+        String rewardText = "§f" + money + " §e金币"
+                + (reward != null && plugin.getQuestRewardStickerAmount() > 0
+                ? " §a+ §f" + plugin.getQuestRewardStickerAmount() + " 个" + reward.getDisplay() : "");
+
+        if (quests.isEmpty()) {
+            inv.setItem(13, button(Material.BARRIER, "§c今天没有委托",
+                    "§b", "§7 §k||§7 管理员可以调整 Compound.quest 配置", "§d"));
+        }
+        for (int i = 0; i < quests.size() && i < 7; i++) {
+            QuestData quest = quests.get(i);
+            String status;
+            String hint;
+            if (quest.isClaimed()) {
+                status = "§7已领取";
+                hint = "§7 §k||§7 这条委托今天已经完成了";
+            } else if (quest.isComplete()) {
+                status = "§a可领取";
+                hint = "§7 §k||§a 点击领取奖励";
+            } else if (QuestType.SUBMIT.equals(quest.getType())) {
+                status = "§e待交付";
+                hint = "§7 §k||§e 点击选择要交付的精灵";
+            } else {
+                status = "§e进行中";
+                hint = "§7 §k||§7 完成后回到这里领取";
+            }
+            inv.setItem(10 + i, button(questIcon(quest.getType()),
+                    "§f" + questText(plugin, quest) + " §8[" + status + "§8]",
+                    "§b",
+                    "§7 §k||§e 进度: §f" + quest.getProgress() + " §7/ §f" + quest.getTarget(),
+                    hint,
+                    "§7 §k||§e 奖励: " + rewardText,
+                    "§d"));
+        }
+
+        inv.setItem(22, button(Material.BARRIER, "§c返回合成界面",
+                "§b", "§7 §k||§e 委托每天 §f00:00 §e按本地时间刷新", "§d"));
+
+        p.closeInventory();
+        p.openInventory(inv);
+    }
+
+    /** 委托文案：类型配置里的 display 模板展开 {@code {target}} / {@code {star}}。 */
+    private static String questText(PokeUtils plugin, QuestData quest) {
+        for (QuestType type : plugin.getQuestTypes()) {
+            if (type.getKey().equals(quest.getType())) {
+                return type.format(quest.getTarget());
+            }
+        }
+        return "§f" + quest.getType() + " §f" + quest.getTarget();
+    }
+
+    private static Material questIcon(String type) {
+        if (QuestType.SUCCESS.equals(type)) {
+            return Material.EMERALD;
+        }
+        if (QuestType.ATTEMPT.equals(type)) {
+            return Material.PAPER;
+        }
+        if (QuestType.SALVAGE.equals(type)) {
+            return Material.SLIME_BALL;
+        }
+        if (QuestType.STICKER.equals(type)) {
+            return Material.DRAGONS_BREATH;
+        }
+        return Material.GOLD_INGOT;
+    }
+
+    /**
+     * 打开合成图鉴。
+     *
+     * <p>分两区：上方 45 格是收录到的精灵列表（分页），下方右侧是里程碑奖励按钮
+     * （最多 6 个，超出的会在关闭按钮的说明里提示）。</p>
+     */
+    public void openDexGui(Player p, int page) {
+        this.select = true;
+        PokeUtils plugin = PokeUtils.getInstance();
+        Map<String, Integer> all = plugin.getDexAll(p);
+        List<String> species = new ArrayList<String>(all.keySet());
+        int pageSize = 45;
+        int pages = Math.max((species.size() + pageSize - 1) / pageSize, 1);
+        int current = page < 1 ? 1 : (page > pages ? pages : page);
+
+        Inventory inv = Bukkit.createInventory(null, 54, TITLE_DEX + current);
+        ItemStack pane = greyPane();
+        // 只铺列表区以后的格子，前 45 格留给精灵图标
+        for (int i = 0; i < 54; i++) {
+            inv.setItem(i, pane);
+        }
+
+        int start = (current - 1) * pageSize;
+        for (int i = 0; i < pageSize && start + i < species.size(); i++) {
+            String name = species.get(start + i);
+            int amount = all.get(name) == null ? 0 : all.get(name);
+            inv.setItem(i, dexItem(name, amount));
+        }
+
+        inv.setItem(45, button(Material.ARROW, "§e上一页 §7(" + current + " / " + pages + ")"));
+        inv.setItem(49, button(Material.BARRIER, "§c返回合成界面",
+                "§b",
+                "§7 §k||§e 已收录: §f" + species.size() + " §e种精灵",
+                "§7 §k||§e 累计产出: §f" + totalDexAmount(p) + " §e次",
+                "§7 §k||§e 奖励档位: §f" + plugin.getDexRewards().size() + " §e个",
+                "§d"));
+        inv.setItem(53, button(Material.ARROW, "§e下一页 §7(" + current + " / " + pages + ")"));
+
+        // 里程碑奖励按钮：固定 6 个位置
+        java.util.Set<Integer> claimed = plugin.getDexClaimed(p);
+        int[] rewardSlots = {46, 47, 48, 50, 51, 52};
+        List<PokeUtils.DexReward> rewards = plugin.getDexRewards();
+        int have = species.size();
+        for (int i = 0; i < rewards.size() && i < rewardSlots.length; i++) {
+            PokeUtils.DexReward reward = rewards.get(i);
+            boolean done = have >= reward.milestone;
+            boolean taken = claimed.contains(reward.milestone);
+            StickerType sticker = plugin.getStickerType(reward.sticker);
+            String state = taken ? "§7已领取" : (done ? "§a可领取" : "§c未达成");
+            inv.setItem(rewardSlots[i], button(done && !taken ? Material.CHEST : Material.TRAPPED_CHEST,
+                    "§e图鉴奖励 §f" + reward.milestone + " §8[" + state + "§8]",
+                    "§b",
+                    "§7 §k||§e 进度: §f" + have + " §7/ §f" + reward.milestone,
+                    "§7 §k||§e 奖励: §f" + reward.money + " §e金币"
+                            + (sticker != null && reward.stickerAmount > 0
+                            ? " §a+ §f" + reward.stickerAmount + " 个" + sticker.getDisplay() : ""),
+                    taken ? "§7 §k||§7 每个档位只能领取一次"
+                            : (done ? "§7 §k||§a 点击领取" : "§7 §k||§7 继续收集即可解锁"),
+                    "§d"));
+        }
+
+        p.closeInventory();
+        p.openInventory(inv);
+    }
+
+    private int totalDexAmount(Player p) {
+        int total = 0;
+        for (Integer amount : PokeUtils.getInstance().getDexAll(p).values()) {
+            total += amount == null ? 0 : amount;
+        }
+        return total;
+    }
+
+    /** 渲染图鉴里的一格：优先用真实精灵贴图，取不到就退化成一张写着名字的纸。 */
+    private static ItemStack dexItem(String speciesName, int amount) {
+        ItemStack fallback = new ItemStack(Material.PAPER);
+        try {
+            String normalized = speciesName.replace("Ho-Oh", "HoOh");
+            EnumSpecies species = EnumSpecies.valueOf(normalized);
+            Pokemon pokemon = Pixelmon.pokemonFactory.create(species);
+            ItemStack item = Blank038API.getPokemonAPI().getSpriteHelper().getSpriteItem(pokemon);
+            if (item == null) {
+                item = fallback;
+            }
+            ItemMeta meta = item.getItemMeta();
+            if (meta != null) {
+                meta.setDisplayName("§f" + PokemonUtil.getPokemonName(species));
+                List<String> lore = new ArrayList<String>();
+                lore.add("§b");
+                lore.add("§7 §k||§e 已产出: §f" + amount + " §e次");
+                lore.add("§d");
+                meta.setLore(lore);
+                item.setItemMeta(meta);
+            }
+            return item;
+        } catch (Throwable t) {
+            ItemMeta meta = fallback.getItemMeta();
+            meta.setDisplayName("§7" + speciesName);
+            meta.setLore(java.util.Arrays.asList("§b", "§7 §k||§e 已产出: §f" + amount + " §e次", "§d"));
+            fallback.setItemMeta(meta);
+            return fallback;
+        }
+    }
+
+    /** 打开粘剂合成界面。 */
+    public void openStickerCraftGui(Player p) {
+        this.select = true;
+        PokeUtils plugin = PokeUtils.getInstance();
+        Inventory inv = Bukkit.createInventory(null, 27, TITLE_CRAFT);
+        ItemStack pane = greyPane();
+        for (int i = 0; i < 27; i++) {
+            inv.setItem(i, pane);
+        }
+
+        List<StickerRecipe> recipes = plugin.getStickerRecipes();
+        if (recipes.isEmpty()) {
+            inv.setItem(13, button(Material.BARRIER, "§c没有可用配方",
+                    "§b", "§7 §k||§7 管理员可以在 Compound.sticker-craft.recipes 里配置", "§d"));
+        }
+        for (int i = 0; i < recipes.size() && i < 7; i++) {
+            StickerRecipe recipe = recipes.get(i);
+            StickerType from = plugin.getStickerType(recipe.getFrom());
+            StickerType to = plugin.getStickerType(recipe.getTo());
+            if (from == null || to == null) {
+                continue;
+            }
+            inv.setItem(10 + i, button(to.getMaterial(), "§e合成 " + to.getDisplay(),
+                    "§b",
+                    "§7 §k||§e 消耗: §f" + recipe.getAmount() + " 个" + from.getDisplay()
+                            + " §a+ §f" + recipe.getMoney() + " §e金币",
+                    "§7 §k||§e 产出: §f" + recipe.getResult() + " 个" + to.getDisplay(),
+                    "§d"));
+        }
+
+        inv.setItem(22, button(Material.BARRIER, "§c返回合成界面"));
+
+        p.closeInventory();
+        p.openInventory(inv);
     }
 }

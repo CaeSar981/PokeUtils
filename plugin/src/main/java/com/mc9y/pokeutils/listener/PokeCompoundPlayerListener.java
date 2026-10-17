@@ -11,13 +11,22 @@ import com.mc9y.pokeutils.data.LegacyDataMigration;
 import com.mc9y.pokeutils.data.MaterialAccess;
 import com.mc9y.pokeutils.data.MaterialRef;
 import com.mc9y.pokeutils.data.PlayerData;
+import com.mc9y.pokeutils.data.PokemonAttr;
+import com.mc9y.pokeutils.data.QuestData;
+import com.mc9y.pokeutils.data.QuestType;
+import com.mc9y.pokeutils.data.StickerRecipe;
 import com.mc9y.pokeutils.data.Storage;
 import com.mc9y.pokeutils.data.StickerType;
 import com.mc9y.pokeutils.data.YSData;
 import com.pixelmonmod.pixelmon.Pixelmon;
 import com.pixelmonmod.pixelmon.api.pokemon.Pokemon;
 import com.pixelmonmod.pixelmon.enums.EnumSpecies;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Random;
+import java.util.Set;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.OfflinePlayer;
@@ -70,6 +79,48 @@ import org.bukkit.scheduler.BukkitRunnable;
  */
 public class PokeCompoundPlayerListener implements Listener {
 
+    /** 合成成功/失败时抽取使用的随机源（主线程，单实例足够）。 */
+    private static final Random RANDOM = new Random();
+
+    // 第四轮新增功能的显示名，用于「该功能已关闭」的统一提示。
+    private static final String ROUND4_INHERIT = "继承设置";
+    private static final String ROUND4_SALVAGE = "分解回收";
+    private static final String ROUND4_REROLL = "洗练";
+    private static final String ROUND4_CRAFT = "粘剂合成";
+    private static final String ROUND4_QUEST = "每日委托";
+    private static final String ROUND4_DEX = "合成图鉴";
+
+    /** 已经提示过「定向粘剂池与目标档位无交集」的粘剂键，每种只说一次。 */
+    private static final Set<String> POOL_WARNED = new HashSet<String>();
+
+    /**
+     * 主界面上的功能入口统一走这里：功能被 config 关掉时给一句明确提示，而不是静默无反应。
+     *
+     * <p>按钮始终渲染（即使功能关闭）是刻意的 —— 让布局在任何配置下都稳定，
+     * 玩家也不会因为管理员临时开关而「找不到按钮」。</p>
+     */
+    private static boolean openSubGuiIfEnabled(Player p, String feature) {
+        PokeUtils plugin = PokeUtils.getInstance();
+        boolean enabled;
+        if (ROUND4_INHERIT.equals(feature)) {
+            enabled = plugin.isInheritEnabled();
+        } else if (ROUND4_SALVAGE.equals(feature)) {
+            enabled = plugin.isSalvageEnabled();
+        } else if (ROUND4_REROLL.equals(feature)) {
+            enabled = plugin.isRerollEnabled();
+        } else if (ROUND4_CRAFT.equals(feature)) {
+            enabled = plugin.isStickerCraftEnabled();
+        } else if (ROUND4_QUEST.equals(feature)) {
+            enabled = plugin.isQuestEnabled();
+        } else {
+            enabled = plugin.isDexEnabled();
+        }
+        if (!enabled) {
+            p.sendMessage("§3精灵合成 §f|| §c" + feature + "功能已关闭!");
+        }
+        return enabled;
+    }
+
     @EventHandler
     public void onInventoryClick(InventoryClickEvent e) {
         if (e.getInventory().getTitle().equals("§8精灵合成")) {
@@ -90,6 +141,45 @@ public class PokeCompoundPlayerListener implements Listener {
                         case 26:
                             // 新增（玩家体验）：打开产出预览。
                             PokeUtils.getInstance().playerdatas.get(p.getName()).openPreviewGui(p, 1);
+                            break;
+                        case 20:
+                            // 第四轮新增：属性继承设置。
+                            if (!openSubGuiIfEnabled(p, ROUND4_INHERIT)) {
+                                break;
+                            }
+                            PokeUtils.getInstance().playerdatas.get(p.getName()).openInheritGui(p);
+                            break;
+                        case 21:
+                            if (!openSubGuiIfEnabled(p, ROUND4_SALVAGE)) {
+                                break;
+                            }
+                            PokeUtils.getInstance().playerdatas.get(p.getName())
+                                    .openPartyGui(p, PlayerData.PURPOSE_SALVAGE);
+                            break;
+                        case 22:
+                            if (!openSubGuiIfEnabled(p, ROUND4_REROLL)) {
+                                break;
+                            }
+                            PokeUtils.getInstance().playerdatas.get(p.getName())
+                                    .openPartyGui(p, PlayerData.PURPOSE_REROLL);
+                            break;
+                        case 23:
+                            if (!openSubGuiIfEnabled(p, ROUND4_CRAFT)) {
+                                break;
+                            }
+                            PokeUtils.getInstance().playerdatas.get(p.getName()).openStickerCraftGui(p);
+                            break;
+                        case 24:
+                            if (!openSubGuiIfEnabled(p, ROUND4_QUEST)) {
+                                break;
+                            }
+                            PokeUtils.getInstance().playerdatas.get(p.getName()).openQuestGui(p);
+                            break;
+                        case 25:
+                            if (!openSubGuiIfEnabled(p, ROUND4_DEX)) {
+                                break;
+                            }
+                            PokeUtils.getInstance().playerdatas.get(p.getName()).openDexGui(p, 1);
                             break;
                         case 32:
                             if (PokeUtils.getInstance().playerdatas.containsKey(p.getName())) {
@@ -312,9 +402,18 @@ public class PokeCompoundPlayerListener implements Listener {
                                                             MaterialAccess.consume(p, pd.getMaterial2());
                                                         }
                                                         // starPMs 已在扣费前的空池预检处取好（非空），此处直接复用。
-                                                        String rpmn = ((String) starPMs.get((int) (Math.random() * (double) starPMs.size()))).replace("Ho-Oh", "HoOh");
+                                                        // 第四轮新增：定向粘剂会先把产出池收窄到它指定的种族上。
+                                                        List<String> pool = filterPoolBySticker(starPMs, pd.getYS());
+                                                        String rpmn = ((String) pool.get((int) (Math.random() * (double) pool.size()))).replace("Ho-Oh", "HoOh");
                                                         Pokemon pokemon = Pixelmon.pokemonFactory.create(EnumSpecies.valueOf(rpmn));
                                                         pokemon.setLevel(1);
+                                                        // 第四轮新增：属性继承。必须在 givePlayerPokemon 之前应用 ——
+                                                        // 发放之后再改虽然对象是同一个，但那意味着「玩家背包里
+                                                        // 短暂出现过一只白板精灵」，任何异步观察者（其他插件的
+                                                        // 精灵扫描、Pixelmon 自己的存档线程）都可能读到中间态。
+                                                        // pokemon1 / pokemon2 是 MaterialAccess.resolve 拿到的对象
+                                                        // 引用：无论材料来自队伍还是电脑盒子，摘除之后引用依然有效。
+                                                        String inheritDetail = applyInheritanceTo(pd, pokemon, pokemon1, pokemon2);
                                                         PlayerStorageUtil.givePlayerPokemon(p, pokemon);
                                                         p.sendMessage("§3精灵合成 §f|| §a成功合成一只 " + psa.getPokeShowName(star1 + 1) + " §a, 精灵已发放至精灵槽！");
                                                         // 新增（玩家体验）：成功音效 + 一条屏幕 Title。
@@ -322,11 +421,17 @@ public class PokeCompoundPlayerListener implements Listener {
                                                         PokeUtils.getInstance().playFeedback(p, "success");
                                                         PokeUtils.getInstance().sendSuccessTitle(p, psa.getPokeShowName(star1 + 1),
                                                                 PokemonUtil.getPokemonName(pokemon.getSpecies()));
+                                                        // 第四轮新增：图鉴收录 + 委托进度。
+                                                        // 图鉴只记「产出过的种族」，同一只重复产出会累加次数。
+                                                        PokeUtils.getInstance().recordDex(p, pokemon.getSpecies().name());
+                                                        PokeUtils.getInstance().addQuestProgress(p, QuestType.SUCCESS, 1);
+                                                        PokeUtils.getInstance().addQuestProgress(p, QuestType.ATTEMPT, 1);
                                                         // 新增：合成流水日志（原插件一次 getLogger() 都没调过）
                                                         PokeUtils.getInstance().logCompound(p.getName(), star1, pd.getYS(), true,
                                                                 money, 0, "产出 " + psa.getPokeShowName(star1 + 1)
                                                                         + (pity ? " (保底)" : "")
-                                                                        + (useVoucher ? " (合成券)" : ""));
+                                                                        + (useVoucher ? " (合成券)" : "")
+                                                                        + (inheritDetail.isEmpty() ? "" : " 继承[" + inheritDetail + "]"));
                                                         // 修复：播报阈值与文案原来写死（>=6 星 + 固定文案），现由配置提供。
                                                         broadcastCompound(p, star1 + 1, pokemon, psa);
                                                     } else {
@@ -383,10 +488,18 @@ public class PokeCompoundPlayerListener implements Listener {
                                                         failMsg.append("！");
                                                         p.sendMessage(failMsg.toString());
 
+                                                        // 第四轮新增：保护符（Compound.stickers 里的 protect: true）。
+                                                        // 带上它失败时两只材料原样保留，只损失粘剂与金币。
+                                                        // 六转七的基础成功率只有 20%，一次失败就是 80 万金币加两只六星精灵；
+                                                        // 这种「倾家荡产式失败」正是玩家算完账之后干脆不去合成的头号原因。
+                                                        boolean protect = PokeUtils.getInstance().isStickerProtect(pd.getYS());
+                                                        if (protect) {
+                                                            p.sendMessage("§3精灵合成 §f|| §e保护符生效, 两只材料精灵已保留！");
+                                                        }
                                                         // 修复：此处原为 if (star1 == 6)，但它被外层 if (star1 < 6) 挡着，
                                                         // star1 最大只能是 5，分支永远不可达 —— config.yml 承诺的
                                                         // 「合成七星失败保留一只精灵」实际从未生效。放开星级上限后本分支才能执行。
-                                                        if (star1 == 6) {
+                                                        else if (star1 == 6) {
                                                             // 修复（原为 if (p.hasPermission("vip.yx") || p.hasPermission("vip.yx"))）：
                                                             // 两个条件完全相同，对应 config.yml 的「优秀训练师 / 传说训练师」两个身份丢了一个。
                                                             // 权限节点改由 config.yml 的 VIP.keep-one 配置，缺省回退到 vip.yx / vip.cs。
@@ -429,9 +542,16 @@ public class PokeCompoundPlayerListener implements Listener {
                                                             PokeUtils.getInstance().notifyPity(p, nextStreak, threshold);
                                                         }
 
+                                                        // 第四轮新增：委托进度 —— 失败也算「进行了一次合成」。
+                                                        // 「进行 N 次合成」这类委托之所以存在，正是因为高星档成功率很低：
+                                                        // 只认成功的委托在六转七上会变成几天都做不完。
+                                                        PokeUtils.getInstance().addQuestProgress(p, QuestType.ATTEMPT, 1);
+
                                                         // 新增：合成流水日志
                                                         StringBuilder detail = new StringBuilder(
-                                                                star1 == 6 && hasKeepOnePermission(p) ? "六星失败, 保留一只" : "-");
+                                                                protect ? "保护符, 材料保留"
+                                                                        : (star1 == 6 && hasKeepOnePermission(p)
+                                                                                ? "六星失败, 保留一只" : "-"));
                                                         if (stickerRefund > 0) {
                                                             detail.append(" 返还")
                                                                     .append(stickerRefund)
@@ -623,7 +743,344 @@ public class PokeCompoundPlayerListener implements Listener {
                     }
                 }
             }
+        } else if (e.getInventory().getTitle().equals(PlayerData.TITLE_INHERIT)) {
+            // 第四轮新增：继承设置。
+            e.setCancelled(true);
+            if (isTop(e, PlayerData.TITLE_INHERIT)) {
+                Player p = (Player) e.getWhoClicked();
+                PlayerData pd = PokeUtils.getInstance().playerdatas.get(p.getName());
+                if (pd != null) {
+                    int slot = e.getSlot();
+                    if (slot == 10 || slot == 12 || slot == 14) {
+                        int max = PokeUtils.getInstance().getInheritMaxPicks();
+                        // 只有在「从关到开」时才需要检查上限 —— 关掉一项永远允许，
+                        // 否则管理员把 max-picks 调小之后玩家会连取消都做不到。
+                        boolean turningOn = (slot == 10 && !pd.isInheritNature())
+                                || (slot == 12 && !pd.isInheritAbility())
+                                || (slot == 14 && !pd.isInheritIv());
+                        if (turningOn && pd.getInheritPicks() >= max) {
+                            p.sendMessage("§3精灵合成 §f|| §c最多只能同时继承 " + max + " 项, 请先取消其它项!");
+                        } else {
+                            if (slot == 10) {
+                                pd.toggleInheritNature();
+                            } else if (slot == 12) {
+                                pd.toggleInheritAbility();
+                            } else {
+                                pd.toggleInheritIv();
+                            }
+                            PokeUtils.getInstance().playFeedback(p, "select");
+                        }
+                        pd.openInheritGui(p);
+                    } else if (slot == 16) {
+                        pd.cycleInheritSource();
+                        PokeUtils.getInstance().playFeedback(p, "select");
+                        pd.openInheritGui(p);
+                    } else if (slot == 22) {
+                        PokeUtils.getInstance().playFeedback(p, "select");
+                        pd.setSelect(false);
+                        pd.openGui(p);
+                    }
+                }
+            }
+        } else if (e.getInventory().getTitle().equals(PlayerData.TITLE_PARTY_SALVAGE)
+                || e.getInventory().getTitle().equals(PlayerData.TITLE_PARTY_REROLL)
+                || e.getInventory().getTitle().equals(PlayerData.TITLE_PARTY_SUBMIT)) {
+            // 第四轮新增：分解 / 洗练 / 交付 的精灵选择界面（三合一）。
+            e.setCancelled(true);
+            if (isTop(e, e.getInventory().getTitle())) {
+                Player p = (Player) e.getWhoClicked();
+                PlayerData pd = PokeUtils.getInstance().playerdatas.get(p.getName());
+                if (pd != null) {
+                    if (e.getSlot() == 40) {
+                        PokeUtils.getInstance().playFeedback(p, "select");
+                        pd.setSelect(false);
+                        pd.openGui(p);
+                        return;
+                    }
+                    int partySlot = partySlotOf(e.getSlot());
+                    if (partySlot < 0) {
+                        return;
+                    }
+                    ItemStack item = e.getCurrentItem();
+                    if (item == null || item.getType().equals(Material.AIR)
+                            || item.getType().equals(Material.BARRIER)) {
+                        return;
+                    }
+                    pd.setPendingPartySlot(partySlot);
+                    if (pd.getPendingPurpose() == PlayerData.PURPOSE_SALVAGE) {
+                        pd.openSalvageConfirmGui(p);
+                    } else if (pd.getPendingPurpose() == PlayerData.PURPOSE_REROLL) {
+                        pd.openRerollGui(p);
+                    } else {
+                        // 交付委托：星级校验与扣精灵都在主类里做，这里只负责把选择传过去。
+                        PokeUtils.getInstance().submitQuest(p, pd.getPendingQuestSlot(), partySlot);
+                    }
+                }
+            }
+        } else if (e.getInventory().getTitle().equals(PlayerData.TITLE_SALVAGE_CONFIRM)) {
+            // 第四轮新增：分解确认。
+            e.setCancelled(true);
+            if (isTop(e, PlayerData.TITLE_SALVAGE_CONFIRM)) {
+                Player p = (Player) e.getWhoClicked();
+                PlayerData pd = PokeUtils.getInstance().playerdatas.get(p.getName());
+                if (pd != null) {
+                    if (e.getSlot() == 11) {
+                        PokeUtils.getInstance().salvagePokemon(p, pd.getPendingPartySlot());
+                        pd.setPendingPartySlot(-1);
+                        pd.setSelect(false);
+                        pd.openGui(p);
+                    } else if (e.getSlot() == 15) {
+                        PokeUtils.getInstance().playFeedback(p, "select");
+                        pd.openPartyGui(p, PlayerData.PURPOSE_SALVAGE);
+                    } else if (e.getSlot() == 22) {
+                        PokeUtils.getInstance().playFeedback(p, "select");
+                        pd.setSelect(false);
+                        pd.openGui(p);
+                    }
+                }
+            }
+        } else if (e.getInventory().getTitle().equals(PlayerData.TITLE_REROLL)) {
+            // 第四轮新增：洗练面板。槽 10~17 依次对应 六项个体值 + 性格 + 特性。
+            e.setCancelled(true);
+            if (isTop(e, PlayerData.TITLE_REROLL)) {
+                Player p = (Player) e.getWhoClicked();
+                PlayerData pd = PokeUtils.getInstance().playerdatas.get(p.getName());
+                if (pd != null) {
+                    int slot = e.getSlot();
+                    if (slot >= 10 && slot <= 17) {
+                        PokeUtils.getInstance().rerollAttr(p, pd.getPendingPartySlot(), slot - 10);
+                        // 洗练后重开面板刷新数值 —— 不刷新的话玩家看不到结果，
+                        // 还得关掉再开一次才能确认自己刚才洗出了什么。
+                        pd.openRerollGui(p);
+                    } else if (slot == 40) {
+                        PokeUtils.getInstance().playFeedback(p, "select");
+                        pd.setSelect(false);
+                        pd.openGui(p);
+                    }
+                }
+            }
+        } else if (e.getInventory().getTitle().equals(PlayerData.TITLE_QUEST)) {
+            // 第四轮新增：每日委托。槽 10 起依次是第 0、1、2… 条委托。
+            e.setCancelled(true);
+            if (isTop(e, PlayerData.TITLE_QUEST)) {
+                Player p = (Player) e.getWhoClicked();
+                PlayerData pd = PokeUtils.getInstance().playerdatas.get(p.getName());
+                if (pd != null) {
+                    int slot = e.getSlot();
+                    if (slot >= 10 && slot <= 16) {
+                        int questSlot = slot - 10;
+                        QuestData quest = findQuest(PokeUtils.getInstance().getQuestBoard(p), questSlot);
+                        if (quest == null) {
+                            p.sendMessage("§3精灵合成 §f|| §c该委托不存在!");
+                        } else if (quest.isClaimed()) {
+                            p.sendMessage("§3精灵合成 §f|| §c这条委托已经领取过了!");
+                        } else if (QuestType.SUBMIT.equals(quest.getType()) && !quest.isComplete()) {
+                            // 交付类：先让玩家选一只精灵，而不是直接发奖。
+                            pd.setPendingQuestSlot(questSlot);
+                            PokeUtils.getInstance().playFeedback(p, "select");
+                            pd.openPartyGui(p, PlayerData.PURPOSE_SUBMIT);
+                        } else {
+                            PokeUtils.getInstance().claimQuest(p, questSlot);
+                            pd.openQuestGui(p);
+                        }
+                    } else if (slot == 22) {
+                        PokeUtils.getInstance().playFeedback(p, "select");
+                        pd.setSelect(false);
+                        pd.openGui(p);
+                    }
+                }
+            }
+        } else if (e.getInventory().getTitle().startsWith(PlayerData.TITLE_DEX)) {
+            // 第四轮新增：合成图鉴。上方 45 格是精灵列表，下方是翻页与里程碑奖励。
+            e.setCancelled(true);
+            if (e.getClickedInventory() != null
+                    && e.getClickedInventory().getTitle().startsWith(PlayerData.TITLE_DEX)) {
+                Player p = (Player) e.getWhoClicked();
+                PlayerData pd = PokeUtils.getInstance().playerdatas.get(p.getName());
+                if (pd != null) {
+                    int page = 1;
+                    try {
+                        page = Integer.parseInt(e.getClickedInventory().getTitle()
+                                .substring(PlayerData.TITLE_DEX.length()));
+                    } catch (NumberFormatException ignored) {
+                        // 标题被外部改动时按第一页处理，不抛异常
+                    }
+                    int slot = e.getSlot();
+                    if (slot == 45) {
+                        PokeUtils.getInstance().playFeedback(p, "select");
+                        pd.openDexGui(p, page - 1);
+                    } else if (slot == 53) {
+                        PokeUtils.getInstance().playFeedback(p, "select");
+                        pd.openDexGui(p, page + 1);
+                    } else if (slot == 49) {
+                        PokeUtils.getInstance().playFeedback(p, "select");
+                        pd.setSelect(false);
+                        pd.openGui(p);
+                    } else {
+                        int rewardIndex = dexRewardIndex(slot);
+                        if (rewardIndex >= 0) {
+                            List<PokeUtils.DexReward> rewards = PokeUtils.getInstance().getDexRewards();
+                            if (rewardIndex < rewards.size()) {
+                                PokeUtils.getInstance().claimDexMilestone(
+                                        p, rewards.get(rewardIndex).milestone);
+                                pd.openDexGui(p, page);
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (e.getInventory().getTitle().equals(PlayerData.TITLE_CRAFT)) {
+            // 第四轮新增：粘剂合成。槽 10 起依次是第 0、1、2… 条配方。
+            e.setCancelled(true);
+            if (isTop(e, PlayerData.TITLE_CRAFT)) {
+                Player p = (Player) e.getWhoClicked();
+                PlayerData pd = PokeUtils.getInstance().playerdatas.get(p.getName());
+                if (pd != null) {
+                    int slot = e.getSlot();
+                    if (slot >= 10 && slot <= 16) {
+                        PokeUtils.getInstance().craftSticker(p, slot - 10);
+                        pd.openStickerCraftGui(p);
+                    } else if (slot == 22) {
+                        PokeUtils.getInstance().playFeedback(p, "select");
+                        pd.setSelect(false);
+                        pd.openGui(p);
+                    }
+                }
+            }
         }
+    }
+
+    /** 点击的是不是「顶部这个界面本身」（而不是玩家自己的背包区）。 */
+    private static boolean isTop(InventoryClickEvent e, String title) {
+        return e.getClickedInventory() != null && title.equals(e.getClickedInventory().getTitle());
+    }
+
+    /** 队伍槽位 -> 队伍下标（与 PlayerData#openPartyGui 里的槽位表一一对应）。 */
+    private static int partySlotOf(int slot) {
+        switch (slot) {
+            case 11:
+                return 0;
+            case 13:
+                return 1;
+            case 15:
+                return 2;
+            case 29:
+                return 3;
+            case 31:
+                return 4;
+            case 33:
+                return 5;
+            default:
+                return -1;
+        }
+    }
+
+    /** 图鉴界面上里程碑奖励按钮的槽位 -> 奖励下标（与 PlayerData#openDexGui 对应）。 */
+    private static int dexRewardIndex(int slot) {
+        switch (slot) {
+            case 46:
+                return 0;
+            case 47:
+                return 1;
+            case 48:
+                return 2;
+            case 50:
+                return 3;
+            case 51:
+                return 4;
+            case 52:
+                return 5;
+            default:
+                return -1;
+        }
+    }
+
+    private static QuestData findQuest(List<QuestData> quests, int slot) {
+        for (QuestData quest : quests) {
+            if (quest.getSlot() == slot) {
+                return quest;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 第四轮新增：按「定向粘剂」把产出池收窄。
+     *
+     * <p>三种情况：没配 pool（不限）→ 原样返回；配了且与目标档位有交集 → 返回交集；
+     * 配了但交集为空（例如把「水系」配到了只有火系的档位）→ 退回不限定，并打一次提示。
+     * 最后这种情况刻意<b>不</b>报错中止：粘剂已经消耗掉了，把合成失败掉对玩家不公平，
+     * 而「提示一次让管理员去改配置」是代价最小的处理。</p>
+     */
+    private static List<String> filterPoolBySticker(List<String> pool, String stickerKey) {
+        List<String> wanted = PokeUtils.getInstance().getStickerPool(stickerKey);
+        if (wanted.isEmpty() || pool == null || pool.isEmpty()) {
+            return pool;
+        }
+        Set<String> lower = new HashSet<String>();
+        for (String name : wanted) {
+            lower.add(name.toLowerCase(Locale.ROOT));
+        }
+        List<String> hit = new ArrayList<String>();
+        for (String species : pool) {
+            if (lower.contains(species.toLowerCase(Locale.ROOT))) {
+                hit.add(species);
+            }
+        }
+        if (hit.isEmpty()) {
+            if (POOL_WARNED.add(stickerKey)) {
+                PokeUtils.getInstance().getLogger().warning("定向粘剂 " + stickerKey
+                        + " 的 pool 与本次目标档位的产出池没有交集，本次按不限定处理（请检查配置）。");
+            }
+            return pool;
+        }
+        return hit;
+    }
+
+    /**
+     * 第四轮新增：把玩家在「继承设置」里选的项应用到产物上。
+     *
+     * <p>闪光不在这里，它由两只父本自动决定（不是玩家能选的项），见 {@link PokemonAttr#shinyBonus}。</p>
+     *
+     * @return 实际继承内容的描述（供流水日志），什么都没继承时返回空串
+     */
+    private static String applyInheritanceTo(PlayerData pd, Pokemon result, Pokemon parentA, Pokemon parentB) {
+        PokeUtils plugin = PokeUtils.getInstance();
+        if (!plugin.isInheritEnabled() || result == null) {
+            return "";
+        }
+        // 按「性格 -> 特性 -> 个体值」的顺序取用允许的额度。这样做是因为
+        // max-picks 有可能被管理员在玩家已经勾选之后调小，此时勾选数会超过上限；
+        // 与其全部丢弃，不如稳定地保留前几项，行为至少是可预期的。
+        int allowed = plugin.getInheritMaxPicks();
+        boolean nature = false;
+        boolean ability = false;
+        boolean iv = false;
+        if (allowed > 0 && pd.isInheritNature()) {
+            nature = true;
+            allowed--;
+        }
+        if (allowed > 0 && pd.isInheritAbility()) {
+            ability = true;
+            allowed--;
+        }
+        if (allowed > 0 && pd.isInheritIv()) {
+            iv = true;
+        }
+
+        StringBuilder detail = new StringBuilder();
+        String inherited = PokemonAttr.applyInheritance(result, parentA, parentB, nature, ability, iv,
+                pd.getInheritSource(), plugin.getInheritIvMinPercent(), plugin.getInheritIvMaxPercent(),
+                RANDOM);
+        if (inherited.length() > 0) {
+            detail.append(inherited);
+        }
+        int bonus = PokemonAttr.shinyBonus(parentA, parentB,
+                plugin.getInheritShinySingleBonus(), plugin.getInheritShinyDoubleBonus());
+        if (PokemonAttr.applyShiny(result, bonus, RANDOM)) {
+            detail.append(detail.length() > 0 ? " " : "").append("闪光");
+        }
+        return detail.toString();
     }
 
     /**
@@ -735,8 +1192,18 @@ public class PokeCompoundPlayerListener implements Listener {
             } else if ((e.getInventory().getTitle().startsWith("§8请选择要合成的精灵: ")
                     || e.getInventory().getTitle().equals("§8请选择要使用的粘剂")
                     || e.getInventory().getTitle().startsWith(PlayerData.GUI_PC_SELECT)
-                    || e.getInventory().getTitle().startsWith("§8可能产出的精灵: ")) && isSelect) {
-                PokeUtils.getInstance().playerdatas.get(p.getName()).setSelect(false);
+                    || e.getInventory().getTitle().startsWith("§8可能产出的精灵: ")
+                    // 第四轮新增的子界面同样走「关掉子界面 -> 回到合成主界面」这条路，
+                    // 而不是把玩家丢在一个空屏上。判定条件必须和 isPokeUtilsGuiTitle 保持一致。
+                    || e.getInventory().getTitle().equals(PlayerData.TITLE_INHERIT)
+                    || e.getInventory().getTitle().equals(PlayerData.TITLE_PARTY_SALVAGE)
+                    || e.getInventory().getTitle().equals(PlayerData.TITLE_PARTY_REROLL)
+                    || e.getInventory().getTitle().equals(PlayerData.TITLE_PARTY_SUBMIT)
+                    || e.getInventory().getTitle().equals(PlayerData.TITLE_SALVAGE_CONFIRM)
+                    || e.getInventory().getTitle().equals(PlayerData.TITLE_REROLL)
+                    || e.getInventory().getTitle().equals(PlayerData.TITLE_QUEST)
+                    || e.getInventory().getTitle().equals(PlayerData.TITLE_CRAFT)
+                    || e.getInventory().getTitle().startsWith(PlayerData.TITLE_DEX)) && isSelect) {
                 new BukkitRunnable() {
                     @Override
                     public void run() {
@@ -747,15 +1214,27 @@ public class PokeCompoundPlayerListener implements Listener {
                         if (pd == null || !p.isOnline()) {
                             return;
                         }
-                        // 修复（第七轮 A1 发现）：这一条以前无条件把人拽回主界面，
-                        // 于是「从选料界面点进电脑盒子」会在 2 tick 后被主界面顶掉 ——
-                        // 玩家看到的是一进去就弹回，像是那个按钮没生效。
-                        // 判据与主界面那条分支一致：只要玩家此刻仍开着本插件的某个界面，
-                        // 就说明这是一次**界面切换**而不是放弃，不该替他决定去哪。
-                        if (isPokeUtilsGui(p)) {
+                        // 修复（融合第七轮 A1 与第四轮的两条补丁）：区分「界面切换 / 子界面重绘」
+                        // 与「玩家真的放弃合成」。
+                        //   · 第七轮 A1：「从选料界面点进电脑盒子」是先 close 再 open 另一个标题，
+                        //     原实现无条件 2 tick 后回主界面 → 玩家看到一进去就弹回。
+                        //   · 第四轮：所有子界面的刷新都是 closeInventory() + openInventory()
+                        //     同一个标题，原实现把「重绘」也当成「关闭」→ 勾一下性格、翻个页
+                        //     都会闪回主界面。
+                        // 两种情形用同一个判据覆盖：2 tick 后玩家此刻开着的还是不是本插件界面。
+                        //   · 仍是子界面（含刚重绘的、或已切到别的子界面）→ 保持子界面态，
+                        //     并把 select 补回来（子界面里按 ESC 仍要能回主界面）
+                        //   · 已经回到主界面 → 什么都不做（他本来就在主界面上）
+                        //   · 什么界面都没有（按 ESC 退出了）→ 送回合成主界面，别丢在空屏上
+                        String current = currentGuiTitle(p);
+                        if (current != null && !current.equals(PlayerData.TITLE_MAIN)) {
+                            pd.setSelect(true);
                             return;
                         }
-                        pd.openGui(p);
+                        pd.setSelect(false);
+                        if (current == null) {
+                            pd.openGui(p);
+                        }
                     }
                 }.runTaskLater(PokeUtils.getInstance(), 2L);
             }
@@ -770,16 +1249,46 @@ public class PokeCompoundPlayerListener implements Listener {
         return isPokeUtilsGuiTitle(p.getOpenInventory().getTopInventory().getTitle());
     }
 
+    /**
+     * 玩家此刻真正开着的插件界面标题；不是本插件的界面（含「什么都没开」）返回 {@code null}。
+     *
+     * <p>与 {@link #isPokeUtilsGui} 的区别：这里要把「主界面」与「子界面」区分开，
+     * 所以不能只回一个 boolean。用在 {@code onInventoryClose} 的延迟判定里 ——
+     * 子界面刷新与玩家按 ESC 都会走到那条分支，只有看到「当前确实不在任何插件界面」时
+     * 才应该把主界面推给他。</p>
+     */
+    private static String currentGuiTitle(Player p) {
+        if (p.getOpenInventory() == null || p.getOpenInventory().getTopInventory() == null) {
+            return null;
+        }
+        String title = p.getOpenInventory().getTopInventory().getTitle();
+        return isPokeUtilsGuiTitle(title) ? title : null;
+    }
+
     /** 标题是否属于本插件的界面之一（点击分支与拖拽分支共用）。 */
     private static boolean isPokeUtilsGuiTitle(String title) {
         if (title == null) {
             return false;
         }
-        return title.equals("§8精灵合成")
+        return title.equals(PlayerData.TITLE_MAIN)
                 || title.equals("§8请选择要使用的粘剂")
                 || title.startsWith("§8请选择要合成的精灵: ")
                 || title.startsWith(PlayerData.GUI_PC_SELECT)
-                || title.startsWith("§8可能产出的精灵: ");
+                || title.startsWith("§8可能产出的精灵: ")
+                // 第四轮新增的九个界面（继承 / 三种选精灵 / 分解确认 / 洗练面板 /
+                // 委托 / 粘剂合成 / 图鉴）。任何一个漏在这里，后果都是「关掉它时
+                // 会话被当成『玩家放弃合成』清掉」，之后所有点击静默落空 ——
+                // 这是本插件历史上最容易复发的一类 bug（见修复记录第 2 条）。
+                // 第七轮的电脑盒子选料界面（GUI_PC_SELECT）同样在这个集合里。
+                || title.equals(PlayerData.TITLE_INHERIT)
+                || title.equals(PlayerData.TITLE_PARTY_SALVAGE)
+                || title.equals(PlayerData.TITLE_PARTY_REROLL)
+                || title.equals(PlayerData.TITLE_PARTY_SUBMIT)
+                || title.equals(PlayerData.TITLE_SALVAGE_CONFIRM)
+                || title.equals(PlayerData.TITLE_REROLL)
+                || title.equals(PlayerData.TITLE_QUEST)
+                || title.equals(PlayerData.TITLE_CRAFT)
+                || title.startsWith(PlayerData.TITLE_DEX);
     }
 
     /** 合成七星失败时是否可保留一只精灵，权限节点由 config.yml 的 {@code VIP.keep-one} 配置。 */

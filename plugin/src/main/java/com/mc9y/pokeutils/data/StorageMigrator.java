@@ -141,8 +141,55 @@ public final class StorageMigrator {
                 wroteStickers++;
             }
 
+            // ---- 第 4 步：委托与图鉴（第四轮玩法回归后新增）----
+            // 这两样都是「按 UUID 落库」的资产，只搬 players/stickers 会让它们凭空消失：
+            //   · 委托：当天没领的奖、做到一半的进度会归零，玩家第二天进来一脸问号
+            //   · 图鉴：收录种类与已领里程碑是长期累积的，丢了等于把里程碑奖励重发一遍
+            // 之所以放在粘剂之后，是因为它依赖 players 列表里的名字（touchPlayer 要用）。
+            int wroteQuests = 0;
+            int wroteDexSpecies = 0;
+            int wroteDexRewards = 0;
+            for (Storage.PlayerRecord player : players) {
+                for (String day : source.listQuestDays(player.uuid)) {
+                    List<QuestData> quests = source.getQuests(player.uuid, day);
+                    if (quests.isEmpty()) {
+                        continue;
+                    }
+                    // insertQuests 只负责「建行」，建出来的 progress=0 / claimed=0。
+                    // 已有进度必须再写一遍 —— 否则搬过去的委托全都变成「还没做过」，
+                    // 而玩家的进度条会从满格掉回 0。
+                    target.insertQuests(player.uuid, player.name, day, quests);
+                    for (QuestData quest : quests) {
+                        target.setQuestProgress(player.uuid, day, quest.getSlot(), quest.getProgress());
+                        if (quest.isClaimed()) {
+                            target.setQuestClaimed(player.uuid, day, quest.getSlot());
+                        }
+                    }
+                    wroteQuests += quests.size();
+                }
+
+                // 图鉴次数只能靠 dexAdd 累加（契约里没有「写绝对值」的版本），
+                // 所以这里按次数循环。正常玩家同一种族最多几十次，迁移是运维动作、
+                // 只在换后端时跑一次，多出来的往返换取「接口面不扩大」是划算的。
+                for (Map.Entry<String, Integer> entry : source.dexAll(player.uuid).entrySet()) {
+                    int amount = entry.getValue() == null ? 0 : entry.getValue().intValue();
+                    for (int i = 0; i < amount; i++) {
+                        target.dexAdd(player.uuid, player.name, entry.getKey());
+                    }
+                    wroteDexSpecies++;
+                }
+                for (Integer milestone : source.dexClaimed(player.uuid)) {
+                    target.dexClaim(player.uuid, player.name, milestone.intValue());
+                    wroteDexRewards++;
+                }
+            }
+
             messages.add("§a 迁移完成：§f" + wrotePlayers + " §a名玩家 / §f" + wroteStickers
                     + " §a条粘剂行已写入 " + targetKind + "。");
+            if (wroteQuests > 0 || wroteDexSpecies > 0 || wroteDexRewards > 0) {
+                messages.add("§7 另搬了 §f" + wroteQuests + " §7条委托 / §f" + wroteDexSpecies
+                        + " §7个图鉴种族 / §f" + wroteDexRewards + " §7个已领里程碑。");
+            }
             messages.add("§7 源端数据未做任何改动。目标端现有 §f"
                     + target.listPlayers().size() + " §7名玩家。");
             messages.add("§7 下一步：把 config.yml 的 §fStorage.type §7改成 §f" + targetKind
