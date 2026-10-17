@@ -161,14 +161,22 @@ public class SqliteStorage implements Storage {
         this.source = ds;
         this.connection = ds.getConnection();
 
-        try (Statement st = this.connection.createStatement()) {
-            st.executeUpdate(DDL_PLAYER);
-            st.executeUpdate(DDL_STICKER);
-            st.executeUpdate(DDL_QUEST);
-            st.executeUpdate(DDL_DEX);
-            st.executeUpdate(DDL_DEX_REWARD);
+        try {
+            try (Statement st = this.connection.createStatement()) {
+                st.executeUpdate(DDL_PLAYER);
+                st.executeUpdate(DDL_STICKER);
+                st.executeUpdate(DDL_QUEST);
+                st.executeUpdate(DDL_DEX);
+                st.executeUpdate(DDL_DEX_REWARD);
+            }
+            this.ensurePlayerColumns();
+        } catch (SQLException ex) {
+            // 建表/补列失败时要把连接关掉：上层会去回退别的后端，这个半成品实例
+            // 不会有人再调 close()。在 Windows 上泄漏的是一个**文件句柄** ——
+            // 它不仅占内存，还会把 .db 锁住，让运维连删都删不掉。
+            this.close();
+            throw ex;
         }
-        this.ensurePlayerColumns();
     }
 
     /**
@@ -542,6 +550,44 @@ public class SqliteStorage implements Storage {
             throw new StorageException("SQLite 写入 setFailStar(" + name + ") 失败: "
                     + ex.getMessage(), ex);
         }
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>一条 {@code LEFT JOIN} 取代原来的三次查询。SQLite 里这三次都是同一个连接上的
+     * 本地读，省下的是「三次语句编译 + 三次游标」；真正的收益在 MySQL 后端
+     * （见 {@link MysqlStorage#loadSnapshot}），这里保持两边语义一致，也让进服路径
+     * 在切换后端时行为不变。</p>
+     */
+    @Override
+    public synchronized PlayerSnapshot loadSnapshot(UUID uuid) {
+        Map<String, Integer> stickers = new HashMap<String, Integer>();
+        if (this.connection == null) {
+            return new PlayerSnapshot(stickers, 0, 0);
+        }
+        int streak = 0;
+        int star = 0;
+        try (PreparedStatement ps = this.connection.prepareStatement(
+                "SELECT p.fail_streak, p.fail_star, s.type, s.amount"
+                        + " FROM pu_player p LEFT JOIN pu_sticker s ON s.uuid = p.uuid"
+                        + " WHERE p.uuid = ?")) {
+            ps.setString(1, uuid.toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    streak = rs.getInt(1);
+                    star = rs.getInt(2);
+                    String type = rs.getString(3);
+                    if (type != null) {
+                        stickers.put(type, rs.getInt(4));
+                    }
+                }
+            }
+        } catch (SQLException ex) {
+            this.log("loadSnapshot", ex);
+            return new PlayerSnapshot(new HashMap<String, Integer>(), 0, 0);
+        }
+        return new PlayerSnapshot(stickers, streak, star);
     }
 
     // ------------------------------------------------------------------ 每日委托

@@ -8,6 +8,7 @@ import com.mc9y.pokeutils.data.LogIndex;
 import com.mc9y.pokeutils.data.LogWriter;
 import com.mc9y.pokeutils.data.PlayerData;
 import com.mc9y.pokeutils.data.PokemonAttr;
+import com.mc9y.pokeutils.data.PreviewIcons;
 import com.mc9y.pokeutils.data.QuestData;
 import com.mc9y.pokeutils.data.QuestType;
 import com.mc9y.pokeutils.data.StickerRecipe;
@@ -1048,6 +1049,90 @@ public class PokeUtils extends JavaPlugin {
         }
     }
 
+    // ================================================================ 星级查询（带缓存）
+    //
+    // 为什么要缓存：PokeStarAPI#getPokemonStar 内部是
+    //   STAR_DATA.stream().filter(...).map(...).findAny()
+    // 也就是「每个种族都把整张星级表线性扫一遍」。而界面渲染是**逐格**调用它的：
+    // 电脑盒子选料一页 30 格、产出预览一页 45 格，翻一次箱/页就是几十次全表扫描。
+    // 单次几微秒看着无所谓，叠在一页 30 格上就是一次肉眼可见的顿挫。
+    //
+    // 安全边界：
+    //   · 数据源是 PokeStar 的 stars.yml，只在 /pu reload（进而 PokeStar reload）时变化 ——
+    //     所以用 reload 作为失效点，和插件里其它配置缓存完全一致；
+    //   · 键是种族名，取值空间由 EnumSpecies 决定（千级），再加一个上限兜住
+    //     「有人拿任意字符串调它」这种不可能但也不必赌的情况；
+    //   · 用 ConcurrentHashMap 而不是 HashMap：不赌调用线程，反正代价可以忽略。
+
+    /** 种族名 -> 星级（PokeStar 的 stars.yml 投影）。 */
+    private final java.util.concurrent.ConcurrentHashMap<String, Integer> starCache =
+            new java.util.concurrent.ConcurrentHashMap<String, Integer>();
+
+    /** 星级 -> 显示名（如「一星」）。空串表示 PokeStar 没配这一档。 */
+    private final java.util.concurrent.ConcurrentHashMap<Integer, String> starDisplayCache =
+            new java.util.concurrent.ConcurrentHashMap<Integer, String>();
+
+    /** 星级缓存条目上限。种族总数远小于它，超限只会出现在异常调用下。 */
+    private static final int STAR_CACHE_LIMIT = 4096;
+
+    /** 复用的 API 实例（构造是空实现，但没必要每次 new）。 */
+    private final PokeStarAPI starApi = new PokeStarAPI();
+
+    /** 查询某种族属于几星（0 = PokeStar 未收录）。结果带缓存，见上方说明。 */
+    public int getPokemonStar(String species) {
+        if (species == null) {
+            return 0;
+        }
+        Integer cached = this.starCache.get(species);
+        if (cached != null) {
+            return cached.intValue();
+        }
+        int star;
+        try {
+            star = this.starApi.getPokemonStar(species);
+        } catch (Throwable t) {
+            // 查不到就当 0（0 星在合成链路上是不可合成的守卫值），但不缓存 ——
+            // 这可能是 PokeStar 正在 reload 的瞬态，别把一次失败永久固化下来。
+            return 0;
+        }
+        if (this.starCache.size() >= STAR_CACHE_LIMIT) {
+            this.starCache.clear();
+        }
+        this.starCache.put(species, Integer.valueOf(star));
+        return star;
+    }
+
+    /** 星级的显示名（PokeStar 未配置时返回空串，调用方不必判空）。 */
+    public String getStarDisplay(int star) {
+        String cached = this.starDisplayCache.get(Integer.valueOf(star));
+        if (cached != null) {
+            return cached;
+        }
+        String name;
+        try {
+            String raw = this.starApi.getPokeShowName(star);
+            name = raw == null ? "" : raw;
+        } catch (Throwable t) {
+            return "";
+        }
+        this.starDisplayCache.put(Integer.valueOf(star), name);
+        return name;
+    }
+
+    /**
+     * 清空星级相关缓存。
+     *
+     * <p>调用点只有两处：{@link #checkStarPools()}（启用与 {@code /pu reload} 都会走）
+     * 和关服收尾。PokeStar 的 stars.yml 本身没有热重载通知，所以「改完 stars.yml 就
+     * {@code /pu reload}」是本插件对运维的既有约定，缓存跟着它失效正好。</p>
+     */
+    public void clearStarCache() {
+        this.starCache.clear();
+        this.starDisplayCache.clear();
+        // 产出预览的图标完全由 stars.yml 决定，跟星级缓存同源同命，一起失效。
+        PreviewIcons.invalidate();
+    }
+
     /**
      * 启动（与 `/pu reload`）时的产出池自检。
      *
@@ -1056,6 +1141,9 @@ public class PokeUtils extends JavaPlugin {
      * {@code IndexOutOfBoundsException}。与其等玩家撞上，不如开机就说清楚。</p>
      */
     public void checkStarPools() {
+        // 自检本身要读的就是「当前生效的 stars.yml」，顺手把星级缓存清掉 ——
+        // 启用与 /pu reload 都会走这里，正好是这套缓存唯一的失效点。
+        this.clearStarCache();
         PokeStarAPI api;
         try {
             api = new PokeStarAPI();
@@ -1491,18 +1579,23 @@ public class PokeUtils extends JavaPlugin {
      *
      * <p>库里还没有今天的记录时才生成并落库 —— 委托是「当天固定」的，
      * 生成算法只依赖 (UUID, 日期) 所以结果稳定，落库只是为了让进度有地方存。</p>
+     *
+     * <p>顺序刻意是「先查库、再生成」：这个方法的主要调用方是 {@link #addQuestProgress}，
+     * 也就是<b>每次合成都走一遍</b>。原实现不管库里有没有都先跑一次加权随机生成一整组委托，
+     * 再在「库里已有」时把刚算出来的那组丢掉 —— 白算一次随机，纯浪费。</p>
      */
     public List<QuestData> getQuestBoard(Player p) {
         String day = this.today();
-        List<QuestData> generated = QuestData.generate(p.getUniqueId(), day,
-                this.getQuestTypes(), this.getQuestDailyAmount());
         if (this.storage == null) {
-            return generated;
+            return QuestData.generate(p.getUniqueId(), day,
+                    this.getQuestTypes(), this.getQuestDailyAmount());
         }
         List<QuestData> stored = this.storage.getQuests(p.getUniqueId(), day);
         if (!stored.isEmpty()) {
             return stored;
         }
+        List<QuestData> generated = QuestData.generate(p.getUniqueId(), day,
+                this.getQuestTypes(), this.getQuestDailyAmount());
         this.storage.insertQuests(p.getUniqueId(), p.getName(), day, generated);
         stored = this.storage.getQuests(p.getUniqueId(), day);
         // 落库失败（或者这一瞬间数据库有问题）时也别让界面空着
@@ -2092,11 +2185,18 @@ public class PokeUtils extends JavaPlugin {
             this.getLogger().warning("清理旧合成日志失败: " + t);
         }
         // 索引要在清理之后建，免得把马上要被删的文件读一遍。
-        int indexed = -1;
+        //
+        // 建索引要全量读盘（上限 history.max-scan-lines 条，默认 5 万行）。这段以前是
+        // 同步跑的 —— 启用阶段无所谓，但 `/reload` 是「先把插件关了再启用」，
+        // 那一刻服里还有玩家，几十万行的读盘会结结实实卡在主线程上。改成后台重建：
+        // LogIndex 自己会在提交任务**之前**置位「重建中」，所以这中间合成的流水
+        // 不会漏（见 LogIndex#rebuildLater）。
         try {
             this.logIndex = new LogIndex(this.getDataFolder(),
                     this.getLogKeepDays(), this.getLogMaxScanLines());
-            indexed = this.logIndex.rebuild();
+            this.logIndex.rebuildLater();
+            this.getLogger().info("合成流水索引正在后台建立（上限 "
+                    + this.getLogMaxScanLines() + " 条，保留 " + this.getLogKeepDays() + " 天）。");
         } catch (Throwable t) {
             this.getLogger().warning("建立合成流水索引失败: " + t);
         }
@@ -2104,10 +2204,6 @@ public class PokeUtils extends JavaPlugin {
             // 兜底：给个空索引，保证 logCompound / 命令永远不会踩空指针。
             this.logIndex = new LogIndex(this.getDataFolder(),
                     this.getLogKeepDays(), this.getLogMaxScanLines());
-        }
-        if (indexed > 0) {
-            this.getLogger().info("合成流水索引已建立：" + indexed + " 条记录（上限 "
-                    + this.getLogMaxScanLines() + " 条）。");
         }
         try {
             this.checkStarPools();
@@ -2167,6 +2263,11 @@ public class PokeUtils extends JavaPlugin {
         this.ysdatas.clear();
         this.playerdatas.clear();
         this.lastCompoundAt.clear();
+        // 星级换算与产出预览图标都是纯缓存，关服/重载时主动放掉 ——
+        // 别指望「类被卸载时自然回收」，插件类在主线程/调度器里都有引用。
+        this.clearStarCache();
+        this.soundWarned.clear();
+        this.logIndex = null;
     }
 
     @Override
@@ -2241,12 +2342,9 @@ public class PokeUtils extends JavaPlugin {
             final LogIndex index = this.logIndex;
             if (index != null) {
                 index.configure(this.getLogKeepDays(), this.getLogMaxScanLines());
-                Async.compute(new Runnable() {
-                    @Override
-                    public void run() {
-                        index.rebuild();
-                    }
-                });
+                // 用 rebuildLater 而不是 Async.compute(rebuild)：
+                // 前者在**返回之前**就把「重建中」置上了，这中间合成的流水不会丢。
+                index.rebuildLater();
             }
             sender.sendMessage("§b精灵信息 §f// §a插件配置重载完成！");
             // 存储段是 reload 唯一覆盖不到的部分：后端在 onEnable 就建好了，换 type、

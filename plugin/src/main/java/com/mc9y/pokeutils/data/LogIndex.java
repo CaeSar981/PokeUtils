@@ -68,14 +68,58 @@ public final class LogIndex {
             this.rebuilding = true;
             this.duringRebuild.clear();
         }
+        return this.rebuildPrepared();
+    }
+
+    /**
+     * 后台重建：<b>先</b>在调用线程上置位「重建中」，再把读盘丢给工作线程。
+     *
+     * <p>顺序很重要。若换个写法（先 {@code Async.compute}，等任务跑起来才置位），
+     * 那两者之间有一个空窗：这期间 {@link #append} 会把新行直接加进 {@link #records}，
+     * 而紧接着的 read 是用磁盘内容<b>整体替换</b> {@code records} —— 如果那行还没落盘，
+     * 它就从索引里消失了（文件里有、{@code /pu history} 看不到，直到下次重建）。</p>
+     *
+     * <p>已经有重建在跑时直接返回：重载连点两下不该排两个全量读盘。</p>
+     */
+    public void rebuildLater() {
+        synchronized (this) {
+            if (this.rebuilding) {
+                return;
+            }
+            this.rebuilding = true;
+            this.duringRebuild.clear();
+        }
+        Async.compute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    LogIndex.this.rebuildPrepared();
+                } catch (Throwable t) {
+                    // 后台线程上的异常没人接（会直接打到日志里），这里主动复位状态，
+                    // 否则 rebuilding 永久为 true，append 就会把之后每一行都堆进
+                    // duringRebuild —— 那张表只进不出，是最典型的「跑久了内存越来越大」。
+                    synchronized (LogIndex.this) {
+                        LogIndex.this.rebuilding = false;
+                        LogIndex.this.duringRebuild.clear();
+                    }
+                }
+            }
+        });
+    }
+
+    /** {@link #rebuild()} 与 {@link #rebuildLater()} 共用的主体（调用前已置位 rebuilding）。 */
+    private int rebuildPrepared() {
         List<CompoundLog.Record> loaded;
         try {
             loaded = CompoundLog.read(this.dataFolder, this.keepDays, this.maxRecords);
         } catch (RuntimeException ex) {
-            synchronized (this) {
-                this.rebuilding = false;
-            }
+            this.resetRebuildState();
             throw ex;
+        } catch (Error err) {
+            // Error 也要复位：原实现只接 RuntimeException，一旦读盘时抛的是
+            // OutOfMemoryError / StackOverflowError，rebuilding 会永久停在 true。
+            this.resetRebuildState();
+            throw err;
         }
         synchronized (this) {
             // 重建期间落进来的那些行：它们同时也已经写进日志文件了，而这次读盘有没有
@@ -93,6 +137,14 @@ public final class LogIndex {
             this.trim();
             this.rebuilding = false;
             return this.records.size();
+        }
+    }
+
+    /** 重建失败后的状态复位（成功路径在 {@link #rebuildPrepared()} 末尾自己复位）。 */
+    private void resetRebuildState() {
+        synchronized (this) {
+            this.rebuilding = false;
+            this.duringRebuild.clear();
         }
     }
 

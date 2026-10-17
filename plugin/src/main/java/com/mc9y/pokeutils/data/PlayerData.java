@@ -589,14 +589,13 @@ public class PlayerData {
         }
 
         PlayerPartyStorage pps = Pixelmon.storageManager.getParty(p.getUniqueId());
-        PokeStarAPI psa = new PokeStarAPI();
         for (int i = 0; i < 6; ++i) {
             Pokemon pokemon = pps.get(i);
             if (pokemon != null) {
                 ItemStack item = Blank038API.getPokemonAPI().getSpriteHelper().getSpriteItem(pokemon);
                 ItemMeta im = item.getItemMeta();
-                int pokeStar = psa.getPokemonStar(pokemon.getSpecies().name());
-                im.setDisplayName("§f" + PokemonUtil.getPokemonName(pokemon) + " (" + psa.getPokeShowName(pokeStar) + "§f)");
+                int pokeStar = PokeUtils.getInstance().getPokemonStar(pokemon.getSpecies().name());
+                im.setDisplayName("§f" + PokemonUtil.getPokemonName(pokemon) + " (" + PokeUtils.getInstance().getStarDisplay(pokeStar) + "§f)");
                 item.setItemMeta(im);
                 inv.setItem(fg1slots[i], item);
             }
@@ -667,7 +666,6 @@ public class PlayerData {
             inv.setItem(i, fg);
         }
 
-        PokeStarAPI psa = new PokeStarAPI();
         int capacity = Math.min(MaterialAccess.boxCapacity(p), PC_CONTENT_SLOTS);
         int total = 0;
         int shown = 0;
@@ -678,13 +676,13 @@ public class PlayerData {
                 continue;
             }
             total += 1;
-            int pokeStar = psa.getPokemonStar(pokemon.getSpecies().name());
+            int pokeStar = PokeUtils.getInstance().getPokemonStar(pokemon.getSpecies().name());
             if (this.pcStarFilter > 0 && pokeStar != this.pcStarFilter) {
                 continue;
             }
             ItemStack item = Blank038API.getPokemonAPI().getSpriteHelper().getSpriteItem(pokemon);
             ItemMeta im = item.getItemMeta();
-            im.setDisplayName("§f" + PokemonUtil.getPokemonName(pokemon) + " (" + psa.getPokeShowName(pokeStar) + "§f)");
+            im.setDisplayName("§f" + PokemonUtil.getPokemonName(pokemon) + " (" + PokeUtils.getInstance().getStarDisplay(pokeStar) + "§f)");
             List<String> lores = new ArrayList<String>();
             lores.add("§7位置: §f" + ref.describe());
             // 已经在另一个材料槽位上选过的，直接标出来 —— 否则玩家点下去只会收到一句拒绝，
@@ -825,9 +823,11 @@ public class PlayerData {
      */
     public void openPreviewGui(Player p, int page) {
         int level = this.star + 1;
-        List<String> pool = PokeUtils.getInstance().getPreviewPool(level);
+        // 图标走缓存（见 PreviewIcons）：原来每翻一页都要为当页每个种族各建一只精灵、
+        // 各渲染一份物品 NBT，45 格就是 45 次 —— 玩家感受到的是「翻页顿一下」。
+        List<ItemStack> icons = PreviewIcons.icons(level);
         int pageSize = PokeUtils.getInstance().getPreviewPageSize();
-        int pages = Math.max((pool.size() + pageSize - 1) / pageSize, 1);
+        int pages = Math.max((icons.size() + pageSize - 1) / pageSize, 1);
         int current = page < 1 ? 1 : (page > pages ? pages : page);
 
         Inventory inv = Bukkit.createInventory(null, 54, "§8可能产出的精灵: " + current);
@@ -840,30 +840,11 @@ public class PlayerData {
             inv.setItem(i, fg);
         }
 
-        PokeStarAPI psa = new PokeStarAPI();
-        String showName = psa.getPokeShowName(level);
+        String showName = PokeUtils.getInstance().getStarDisplay(level);
         int start = (current - 1) * pageSize;
-        for (int i = 0; i < pageSize && start + i < pool.size(); i++) {
-            String species = pool.get(start + i);
-            try {
-                // PokeStar 的表里个别名字带连字符（如 Ho-Oh），枚举常量名不带，需要归一化。
-                EnumSpecies enumSpecies = EnumSpecies.valueOf(species.replace("Ho-Oh", "HoOh"));
-                Pokemon pokemon = Pixelmon.pokemonFactory.create(enumSpecies);
-                ItemStack item = Blank038API.getPokemonAPI().getSpriteHelper().getSpriteItem(pokemon);
-                ItemMeta meta = item.getItemMeta();
-                if (meta != null) {
-                    meta.setDisplayName("§f" + PokemonUtil.getPokemonName(enumSpecies));
-                    item.setItemMeta(meta);
-                }
-                inv.setItem(i, item);
-            } catch (Throwable t) {
-                // 单个种族渲染失败不该让整页打不开
-                ItemStack broken = new ItemStack(Material.PAPER);
-                ItemMeta meta = broken.getItemMeta();
-                meta.setDisplayName("§7" + species);
-                broken.setItemMeta(meta);
-                inv.setItem(i, broken);
-            }
+        for (int i = 0; i < pageSize && start + i < icons.size(); i++) {
+            // clone：缓存里的模板是共享的，直接塞进界面会让两个界面的物品互相串改。
+            inv.setItem(i, icons.get(start + i).clone());
         }
 
         ItemStack prev = new ItemStack(Material.ARROW);
@@ -902,15 +883,14 @@ public class PlayerData {
         // 新增（A1）：判「选没选」用引用是否为空，不能用队伍下标 —— 电脑来源的引用
         // 投影出来的队伍下标是 -1，与「未选」撞车。
         if (this.material1 != null && (need < 2 || this.material2 != null)) {
-            PokeStarAPI psa = new PokeStarAPI();
             Pokemon pm1 = MaterialAccess.resolve(p, this.material1);
             Pokemon pm2 = need < 2 ? pm1 : MaterialAccess.resolve(p, this.material2);
             // 修复（新增防护）：槽位上的精灵可能已经被移走 —— checkJL 由 openGui 调用，
             // 而界面在「选完精灵/粘剂后自动重开」时也会再走一遍。原实现直接 pmX.getSpecies()
             // 解引用，会抛 NullPointerException，把「打开合成界面」这个动作整个炸掉。
             if (pm1 != null && pm2 != null) {
-                int star1 = psa.getPokemonStar(pm1.getSpecies().name());
-                int star2 = psa.getPokemonStar(pm2.getSpecies().name());
+                int star1 = PokeUtils.getInstance().getPokemonStar(pm1.getSpecies().name());
+                int star2 = PokeUtils.getInstance().getPokemonStar(pm2.getSpecies().name());
                 // 修复（原为 star1 < 6）：config.yml 明确标价「六星 -> 七星 消耗 1000000 金币」，
                 // 即 star1 == 6 是合法档位。原条件把它挡在外面，导致六转七永远没有基础成功率
                 // （jl 恒为 0），整档合成实际不可达。
@@ -1061,7 +1041,6 @@ public class PlayerData {
         inv.setItem(40, button(Material.ARROW, "§c返回合成界面"));
 
         PlayerPartyStorage pps = Pixelmon.storageManager.getParty(p.getUniqueId());
-        PokeStarAPI psa = new PokeStarAPI();
         PokeUtils plugin = PokeUtils.getInstance();
         for (int i = 0; i < 6 && i < slots.length; i++) {
             Pokemon pokemon = pps == null ? null : pps.get(i);
@@ -1081,9 +1060,9 @@ public class PlayerData {
             if (im == null) {
                 continue;
             }
-            int star = psa.getPokemonStar(pokemon.getSpecies().name());
+            int star = PokeUtils.getInstance().getPokemonStar(pokemon.getSpecies().name());
             im.setDisplayName("§f" + PokemonUtil.getPokemonName(pokemon)
-                    + " (" + psa.getPokeShowName(star) + "§f)");
+                    + " (" + PokeUtils.getInstance().getStarDisplay(star) + "§f)");
             List<String> lore = new ArrayList<String>();
             lore.add("§b");
             int[] ivs = PokemonAttr.readIvs(pokemon);
@@ -1154,7 +1133,7 @@ public class PlayerData {
             inv.setItem(i, pane);
         }
 
-        int star = new PokeStarAPI().getPokemonStar(pokemon.getSpecies().name());
+        int star = PokeUtils.getInstance().getPokemonStar(pokemon.getSpecies().name());
         int refundSticker = plugin.getSalvageSticker(star);
         StickerType refundType = plugin.getStickerType(plugin.getSalvageStickerType());
 
@@ -1170,7 +1149,7 @@ public class PlayerData {
         ItemMeta im = item.getItemMeta();
         if (im != null) {
             im.setDisplayName("§f" + PokemonUtil.getPokemonName(pokemon)
-                    + " (" + new PokeStarAPI().getPokeShowName(star) + "§f)");
+                    + " (" + PokeUtils.getInstance().getStarDisplay(star) + "§f)");
             im.setLore(java.util.Arrays.asList("§b", "§7 §k||§e 即将分解的就是这一只", "§d"));
             item.setItemMeta(im);
         }

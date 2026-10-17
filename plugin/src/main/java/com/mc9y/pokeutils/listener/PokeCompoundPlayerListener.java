@@ -245,8 +245,8 @@ public class PokeCompoundPlayerListener implements Listener {
                                             return;
                                         }
 
-                                        int star1 = psa.getPokemonStar(pokemon1.getSpecies().name());
-                                        int star2 = psa.getPokemonStar(pokemon2.getSpecies().name());
+                                        int star1 = PokeUtils.getInstance().getPokemonStar(pokemon1.getSpecies().name());
+                                        int star2 = PokeUtils.getInstance().getPokemonStar(pokemon2.getSpecies().name());
                                         // 修复：价格原来写死在这里（{0,1000,10000,30000,100000,400000,1000000}），
                                         // 现改由 config.yml 的 Compound.price.<star> 提供，默认值与原来一致。
 
@@ -304,7 +304,7 @@ public class PokeCompoundPlayerListener implements Listener {
                                                 // ../TestServer/README-测试指南.md 第五节），执行顺序会是：
                                                 //   扣金币 → 扣粘剂 → 关界面 → 删掉两只精灵 → get(...) 抛 IndexOutOfBoundsException
                                                 // 玩家净亏，而控制台只留一行报错。治本靠修 stars.yml，这里是不依赖外部数据的兜底。
-                                                // 注意：提示文案只用档位数字，不引用 psa.getPokeShowName() ——
+                                                // 注意：提示文案只用档位数字，不引用 PokeUtils.getInstance().getStarDisplay() ——
                                                 // 档位缺失时它返回空串，正是本分支要处理的情况。
                                                 List<String> starPMs = psa.getStarPokemon(star1 + 1);
                                                 if (starPMs == null || starPMs.isEmpty()) {
@@ -415,11 +415,11 @@ public class PokeCompoundPlayerListener implements Listener {
                                                         // 引用：无论材料来自队伍还是电脑盒子，摘除之后引用依然有效。
                                                         String inheritDetail = applyInheritanceTo(pd, pokemon, pokemon1, pokemon2);
                                                         PlayerStorageUtil.givePlayerPokemon(p, pokemon);
-                                                        p.sendMessage("§3精灵合成 §f|| §a成功合成一只 " + psa.getPokeShowName(star1 + 1) + " §a, 精灵已发放至精灵槽！");
+                                                        p.sendMessage("§3精灵合成 §f|| §a成功合成一只 " + PokeUtils.getInstance().getStarDisplay(star1 + 1) + " §a, 精灵已发放至精灵槽！");
                                                         // 新增（玩家体验）：成功音效 + 一条屏幕 Title。
                                                         // 原插件从点开界面到拿到精灵全程没有任何声音或特效反馈。
                                                         PokeUtils.getInstance().playFeedback(p, "success");
-                                                        PokeUtils.getInstance().sendSuccessTitle(p, psa.getPokeShowName(star1 + 1),
+                                                        PokeUtils.getInstance().sendSuccessTitle(p, PokeUtils.getInstance().getStarDisplay(star1 + 1),
                                                                 PokemonUtil.getPokemonName(pokemon.getSpecies()));
                                                         // 第四轮新增：图鉴收录 + 委托进度。
                                                         // 图鉴只记「产出过的种族」，同一只重复产出会累加次数。
@@ -428,7 +428,7 @@ public class PokeCompoundPlayerListener implements Listener {
                                                         PokeUtils.getInstance().addQuestProgress(p, QuestType.ATTEMPT, 1);
                                                         // 新增：合成流水日志（原插件一次 getLogger() 都没调过）
                                                         PokeUtils.getInstance().logCompound(p.getName(), star1, pd.getYS(), true,
-                                                                money, 0, "产出 " + psa.getPokeShowName(star1 + 1)
+                                                                money, 0, "产出 " + PokeUtils.getInstance().getStarDisplay(star1 + 1)
                                                                         + (pity ? " (保底)" : "")
                                                                         + (useVoucher ? " (合成券)" : "")
                                                                         + (inheritDetail.isEmpty() ? "" : " 继承[" + inheritDetail + "]"));
@@ -1382,7 +1382,7 @@ public class PokeCompoundPlayerListener implements Listener {
         if (!plugin.isBroadcastEnabled() || star < plugin.getBroadcastMinStar()) {
             return;
         }
-        String starName = psa.getPokeShowName(star);
+        String starName = PokeUtils.getInstance().getStarDisplay(star);
         String pokemonName = pokemon == null ? "" : PokemonUtil.getPokemonName(pokemon.getSpecies());
         String message = plugin.getBroadcastMessage()
                 .replace("{player}", p.getName())

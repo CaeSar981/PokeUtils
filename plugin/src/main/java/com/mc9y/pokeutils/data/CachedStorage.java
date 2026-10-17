@@ -68,6 +68,14 @@ public class CachedStorage implements Storage {
     private static final int BREAKER_THRESHOLD = 5;
     /** 熔断持续时间；到期后放一次写过去试探后端是否恢复。 */
     private static final long BREAKER_MS = 10_000L;
+    /**
+     * 「名字 -> UUID」反查索引的条目上限。
+     *
+     * <p>上限的存在意义是「不许只增不减」。1 万条字符串大约是 1~2 MB，
+     * 对已经跑了几万个账号的老服来说既够用（活跃玩家远少于这个数），
+     * 又不会随开服时间无限长。超限时整体清空 —— 见 {@link #rememberName}。</p>
+     */
+    private static final int NAME_INDEX_LIMIT = 10_000;
 
     private final Storage backend;
     private final Logger logger;
@@ -111,6 +119,17 @@ public class CachedStorage implements Storage {
         boolean dirtyName;
         /** 玩家已退服，落盘完成后可以驱逐。 */
         boolean evictPending;
+        /**
+         * 这个条目是否已经有一个写回任务排在队列里（或正在写）。
+         *
+         * <p>它是「写合并」的闸门：一次合成会连着改三处（粘剂、连败次数、档位），
+         * 原实现每改一处就排一个任务，于是同一份数据在队列里出现三次、落库三次事务。
+         * 后端一旦变慢（网络抖动、锁等待），队列长度就按「改动次数」而不是「玩家数」
+         * 增长 —— 这是真正的无界增长点。加了这道闸门之后，每个玩家最多只有一个在途
+         * 任务，写队列的上界被压到「在线玩家数」，而且写的内容永远是最新值
+         * （任务跑完会重新看一眼脏标记，脏就再排一次）。</p>
+         */
+        boolean scheduled;
         /** 连续写失败次数，成功后清零。 */
         int failures;
         /** 最早可以再试一次的时间戳（失败后按退避推后；未失败过时为 0）。 */
@@ -251,7 +270,7 @@ public class CachedStorage implements Storage {
     public void loadPlayer(UUID uuid, String name) {
         String safe = CachedStorage.nameOf(name);
         if (!safe.isEmpty()) {
-            this.nameIndex.put(safe.toLowerCase(Locale.ROOT), uuid);
+            this.rememberName(safe.toLowerCase(Locale.ROOT), uuid);
         }
         Entry existing = this.cache.get(uuid);
         if (existing != null) {
@@ -265,9 +284,13 @@ public class CachedStorage implements Storage {
         }
         Entry entry = new Entry(uuid, safe);
         try {
-            entry.stickers.putAll(this.backend.getStickers(uuid));
-            entry.failStreak = this.backend.getFailStreak(uuid);
-            entry.failStar = this.backend.getFailStar(uuid);
+            // 一次读回（粘剂 + 连败次数 + 档位）。原来是三次独立查询，
+            // 而这三句都跑在主线程的 PlayerJoinEvent 里 —— 开服瞬间的并发进服
+            // 会把「三次往返」放大成几十组，那是能被玩家看见的卡顿。
+            Storage.PlayerSnapshot snapshot = this.backend.loadSnapshot(uuid);
+            entry.stickers.putAll(snapshot.stickers);
+            entry.failStreak = snapshot.failStreak;
+            entry.failStar = snapshot.failStar;
         } catch (RuntimeException ex) {
             this.logger.warning("读取玩家数据失败，本次以空数据开始: " + ex);
         }
@@ -322,15 +345,39 @@ public class CachedStorage implements Storage {
         if (name == null) {
             return null;
         }
-        UUID cached = this.nameIndex.get(name.toLowerCase(Locale.ROOT));
+        String key = name.toLowerCase(Locale.ROOT);
+        UUID cached = this.nameIndex.get(key);
         if (cached != null) {
             return cached;
         }
         UUID found = this.backend.findUuidByName(name);
         if (found != null) {
-            this.nameIndex.put(name.toLowerCase(Locale.ROOT), found);
+            this.rememberName(key, found);
         }
         return found;
+    }
+
+    /**
+     * 记一条「名字 -> UUID」索引，并给这张表设上界。
+     *
+     * <p>这张表原来是无界的：每来一个新名字就加一项，永不清除。对「几万人的老服」来说
+     * 它是几十万个 UUID 字符串（几个 MB）常年驻留 —— 单看不致命，但它是典型的
+     * 「只增不减」，会随着时间慢慢吃掉堆。</p>
+     *
+     * <p>做法是「超限就整体清空」而不是 LRU：这只是一层避免查库的加速层，清空的代价
+     * 是下一次反查多一次 {@code SELECT}，绝对正确；而 LRU 需要额外的链表结构与锁，
+     * 为了几 MB 的加速层引入一套最容易写错的淘汰逻辑，不值得。</p>
+     */
+    private void rememberName(String lowerName, UUID uuid) {
+        if (lowerName == null || lowerName.isEmpty() || uuid == null) {
+            return;
+        }
+        if (this.nameIndex.size() >= NAME_INDEX_LIMIT && !this.nameIndex.containsKey(lowerName)) {
+            this.nameIndex.clear();
+            this.logger.info("名字索引达到 " + NAME_INDEX_LIMIT + " 条上限，已清空重建"
+                    + "（只是少一层反查加速，不影响任何数据）。");
+        }
+        this.nameIndex.put(lowerName, uuid);
     }
 
     @Override
@@ -377,6 +424,18 @@ public class CachedStorage implements Storage {
         synchronized (entry) {
             return entry.failStar;
         }
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>刻意<b>透传后端</b>而不是先看缓存：这个方法只有「把玩家数据读进缓存」一个调用方
+     * （{@link #loadPlayer}），而那一路上缓存里要么没有这一项、要么是比库更新的版本
+     * （见 {@link #loadPlayer} 的注释）。要组合缓存就别走这个方法。</p>
+     */
+    @Override
+    public PlayerSnapshot loadSnapshot(UUID uuid) {
+        return this.backend.loadSnapshot(uuid);
     }
 
     // ------------------------------------------------------------------ 写
@@ -527,7 +586,7 @@ public class CachedStorage implements Storage {
     private String remember(UUID uuid, String name) {
         String safe = CachedStorage.nameOf(name);
         if (!safe.isEmpty()) {
-            this.nameIndex.put(safe.toLowerCase(Locale.ROOT), uuid);
+            this.rememberName(safe.toLowerCase(Locale.ROOT), uuid);
         }
         return safe;
     }
@@ -563,7 +622,14 @@ public class CachedStorage implements Storage {
 
     // ------------------------------------------------------------------ 落盘
 
-    /** 同步模式直接写穿；异步模式丢给写队列（熔断期间只标脏，交给 {@link #sweep()}）。 */
+    /**
+     * 同步模式直接写穿；异步模式丢给写队列（熔断期间只标脏，交给 {@link #sweep()}）。
+     *
+     * <p>异步模式带<b>写合并</b>：同一玩家如果已经有一个任务在队列里/正在写，这里直接返回，
+     * 不再排第二个。理由见 {@link Entry#scheduled} —— 一次合成会连着改三处数据，
+     * 不去重的话队列长度按「改动次数」增长，后端抖一下就能堆出成百上千个重复任务，
+     * 而它们在语义上完全等价（写的是绝对值，最后那个一定是最新值）。</p>
+     */
     private void schedule(final Entry entry) {
         if (!this.writeBehind) {
             this.flushEntry(entry);
@@ -579,12 +645,56 @@ public class CachedStorage implements Storage {
             }
             return;
         }
-        Async.write(new Runnable() {
-            @Override
-            public void run() {
-                CachedStorage.this.flushEntry(entry);
+        synchronized (entry) {
+            if (entry.scheduled) {
+                return;
             }
-        });
+            entry.scheduled = true;
+        }
+        try {
+            Async.write(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        CachedStorage.this.flushEntry(entry);
+                    } finally {
+                        // 无论成功、失败还是抛异常，闸门都必须放开 ——
+                        // 卡住的闸门会让这个玩家的数据再也不落盘，那比多写几次严重得多。
+                        CachedStorage.this.afterWrite(entry);
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            // 提交阶段就炸了（池已关闭、任务同步执行时抛了 Error）：
+            // 放开闸门，剩下的交给 sweep() 兜底。
+            synchronized (entry) {
+                entry.scheduled = false;
+            }
+            this.logger.warning("写回任务提交失败，稍后由兜底扫描重试: " + t);
+        }
+    }
+
+    /**
+     * 一次写回结束后的收尾：放开闸门，并按「写的过程中又被改脏了」决定要不要立刻再排一次。
+     *
+     * <p>失败过的条目不在这里重排 —— {@code retryAt} 已经在未来，交给 {@link #sweep()}
+     * 按退避时间补。立刻重排会把重试串在同一个单线程队列上，一次连接超时就能拖住全服。</p>
+     */
+    private void afterWrite(Entry entry) {
+        boolean again;
+        synchronized (entry) {
+            entry.scheduled = false;
+            // evictPending 也要算进来：玩家可能恰好在「写回已经跑完、闸门还没放开」的
+            // 这一瞬间退服，那次 schedule 被闸门挡了回去。此时脏标记是空的，
+            // 只看 !clean() 就会永远驱逐不掉这一项 —— 那正是「只增不减」的内存泄漏。
+            // 注意仍然要尊重 retryAt：刚失败过的条目不能在这里立刻重排，
+            // 否则退避就形同虚设，后端一挂就是满速重试。
+            again = (entry.evictPending || !entry.clean())
+                    && entry.retryAt <= System.currentTimeMillis();
+        }
+        if (again) {
+            this.schedule(entry);
+        }
     }
 
     /**
@@ -614,7 +724,9 @@ public class CachedStorage implements Storage {
         for (Entry entry : this.cache.values()) {
             boolean due;
             synchronized (entry) {
-                due = !entry.clean() && now >= entry.retryAt;
+                // evictPending 也要扫：退服那一刻的 schedule 可能正好撞上闸门
+                // （写回在路上），被挡了回来。只看脏标记的话，这一项会永远留在缓存里。
+                due = (entry.evictPending || !entry.clean()) && now >= entry.retryAt;
             }
             if (due) {
                 this.schedule(entry);
@@ -747,6 +859,10 @@ public class CachedStorage implements Storage {
         synchronized (entry) {
             if (entry.evictPending && entry.clean()) {
                 this.cache.remove(entry.uuid, entry);
+                // 驱逐完必须把标记清掉：{@link #afterWrite} 会拿它判断「还要不要排下一次」，
+                // 留着的话就是「排一个空任务 → 发现 evictPending 还是 true → 再排一个」，
+                // 一个已经不在缓存里的条目会把自己排成永动机，白烧一个队列线程。
+                entry.evictPending = false;
             }
         }
     }

@@ -84,6 +84,39 @@ public interface Storage {
     /** 写入连败所属的原料星级档（负数夹到 0）。 */
     void setFailStar(UUID uuid, String name, int star);
 
+    /**
+     * 进服时要读的全部玩家数据：粘剂、连败次数、连败档位。
+     *
+     * <p><b>它存在的理由只有性能</b>：这三份数据原来要三次独立查询，而它们全都发生在
+     * 主线程的 {@code PlayerJoinEvent} 里。开服/重启瞬间几十个人一起进来，就是几十组
+     * 数据库往返叠在主线程上 —— 那是玩家真能感觉到的「进服卡一下」。
+     * 合成一次读之后，进服路径只剩一次往返。</p>
+     */
+    final class PlayerSnapshot {
+        public final Map<String, Integer> stickers;
+        public final int failStreak;
+        public final int failStar;
+
+        public PlayerSnapshot(Map<String, Integer> stickers, int failStreak, int failStar) {
+            this.stickers = stickers == null
+                    ? java.util.Collections.<String, Integer>emptyMap() : stickers;
+            this.failStreak = failStreak < 0 ? 0 : failStreak;
+            this.failStar = failStar < 0 ? 0 : failStar;
+        }
+    }
+
+    /**
+     * 一次读回 {@link PlayerSnapshot}。
+     *
+     * <p>接口的默认实现退化成三次独立查询 —— 对任何第三方/测试实现都仍然可用；
+     * 内置的 SQLite 与 MySQL 后端都覆盖成了<b>单条 {@code LEFT JOIN}</b>，
+     * 把三次往返并成一次。之所以能用 {@code player} 当左表：{@code setSticker}
+     * 在写粘剂之前一定先 {@code touchPlayer}，所以「有粘剂行」必然「有玩家行」。</p>
+     */
+    default PlayerSnapshot loadSnapshot(UUID uuid) {
+        return new PlayerSnapshot(getStickers(uuid), getFailStreak(uuid), getFailStar(uuid));
+    }
+
     // ------------------------------------------------------------------ 每日委托
 
     /**

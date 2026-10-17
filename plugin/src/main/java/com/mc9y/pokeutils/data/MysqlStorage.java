@@ -151,21 +151,32 @@ public class MysqlStorage implements Storage {
         BlockingQueue<Connection> created = new ArrayBlockingQueue<Connection>(this.poolSize);
         // 先建一条：连不上就要在 open() 里如实抛出去，让上层决定「回退 SQLite 还是直接禁用」，
         // 而不是等第一条业务语句才炸。
-        Connection first = this.newConnection();
-        created.add(first);
-        this.pool = created;
-        this.open = true;
-        for (int i = 1; i < this.poolSize; i++) {
-            try {
-                created.add(this.newConnection());
-            } catch (SQLException ex) {
-                this.logger.warning("MySQL 连接池只建成了 " + created.size() + "/" + this.poolSize
-                        + " 条连接，继续运行: " + ex.getMessage());
-                break;
+        try {
+            Connection first = this.newConnection();
+            created.add(first);
+            this.pool = created;
+            this.open = true;
+            for (int i = 1; i < this.poolSize; i++) {
+                try {
+                    created.add(this.newConnection());
+                } catch (SQLException ex) {
+                    this.logger.warning("MySQL 连接池只建成了 " + created.size() + "/" + this.poolSize
+                            + " 条连接，继续运行: " + ex.getMessage());
+                    break;
+                }
             }
+            this.schemaReady = false;
+            this.ensureSchema();
+        } catch (SQLException ex) {
+            // 打开失败时把已经建好的连接关掉。上层会回退 SQLite，而那个半成品实例
+            // 再也不会有人调用它的 close() —— 不在这里收，这几条连接就会一直挂着，
+            // 每重启一次泄漏一组。
+            this.close();
+            throw ex;
+        } catch (RuntimeException ex) {
+            this.close();
+            throw ex;
         }
-        this.schemaReady = false;
-        this.ensureSchema();
     }
 
     @Override
@@ -676,6 +687,52 @@ public class MysqlStorage implements Storage {
         } finally {
             this.release(connection);
         }
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>用一条 {@code LEFT JOIN} 把「连败次数 + 档位」和「全部粘剂」一次读回来，
+     * 替代原来的三次查询。这三份数据的读取全部发生在玩家进服时、主线程上，
+     * 开服瞬间的并发进服会把三次往返放大成几十组，见 {@link Storage.PlayerSnapshot}。</p>
+     *
+     * <p>左表用 {@code player} 是安全的：{@code setSticker} 在写粘剂前一定先
+     * {@code touchPlayer}，所以只要有粘剂行，玩家行必然存在。</p>
+     */
+    @Override
+    public PlayerSnapshot loadSnapshot(UUID uuid) {
+        Map<String, Integer> stickers = new HashMap<String, Integer>();
+        int streak = 0;
+        int star = 0;
+        Connection connection = null;
+        try {
+            connection = this.borrow();
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "SELECT p.fail_streak, p.fail_star, s.type, s.amount"
+                            + " FROM " + this.table("player") + " p"
+                            + " LEFT JOIN " + this.table("sticker") + " s ON s.uuid = p.uuid"
+                            + " WHERE p.uuid = ?")) {
+                ps.setString(1, uuid.toString());
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        streak = rs.getInt(1);
+                        star = rs.getInt(2);
+                        String type = rs.getString(3);
+                        if (type != null) {
+                            stickers.put(type, rs.getInt(4));
+                        }
+                    }
+                }
+            }
+        } catch (SQLException ex) {
+            // 与其它读方法同一条语义：读失败不抛，留痕后返回空快照 ——
+            // 进服路径上的异常会把 PlayerJoinEvent 的后续处理整段吞掉。
+            this.logger.log(java.util.logging.Level.SEVERE, "MySQL 查询失败(loadSnapshot): " + ex, ex);
+            return new PlayerSnapshot(java.util.Collections.<String, Integer>emptyMap(), 0, 0);
+        } finally {
+            this.release(connection);
+        }
+        return new PlayerSnapshot(stickers, streak, star);
     }
 
     // ------------------------------------------------------------------ 每日委托
