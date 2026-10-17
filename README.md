@@ -43,18 +43,24 @@ Pixelmon（1.12.2）服务器的**精灵合成**插件。由原始 jar `PokeUtil
 - **日志保留策略**：`Compound.log.keep-days`，开机清理过期日志
 - **同 tick 防重复点击**：连点器在同一下里塞多次点击也只会结算一次
 
-第四轮：六组玩法（每一组都能单独关掉，见下文「功能开关」）：
+第四轮：六组玩法（主界面槽 20~25 六个入口；配置在 `Compound` 段的
+`inherit` / `reroll` / `salvage` / `sticker-craft` / `quest` / `dex` 六块，每一组都能单独关掉）：
 
-- **属性继承**（主界面槽 20）：合成时可勾选让产物继承父本的性格 / 特性 / 单项个体值，
-  额度由 `Compound.inherit.max-picks` 控制（默认 1 项）
-- **属性洗练**（`/pu reroll`）：花金币 + 粘剂把一只精灵的性格 / 特性 / 单项个体值重掷；
-  `improve-only` 打开时只会掷出不低于当前值的结果
-- **分解回收**（`/pu salvage`）：把一只精灵拆成金币 + 粘剂，返还比例按星级配
-- **粘剂合成**（`/pu craft`）：低阶粘剂 + 金币换高阶，配方写在 `Compound.sticker-craft`
-- **每日委托**（`/pu quest`）：每天按 `quest.daily-amount` 确定性生成几条（同一人同一天永远同一组），
-  完成后回界面交付领奖；`/pu questreset` 可作废当天全部委托
-- **合成图鉴**（`/pu dex`）：记录「合出过哪些种族、各多少次」，按 `dex.rewards`（默认 5 / 10 / 20 种）
-  发里程碑奖励；判重压在数据库主键上，连点两下不会重复发奖
+- **属性继承**（`Compound.inherit`，槽 20）：合成时把**父本**的性格 / 特性 / 个体值继承给产物。
+  界面里逐项勾选，`max-picks` 限制同时继承几项（默认 1 项）；来源可以是父本 A / B 或随机。
+  特性**按槽位继承**（0 = 普通特性、1 = 隐藏特性）而不是按名字 —— 产物是另一个种族，
+  父本的特性名在产物身上往往不存在。个体值按 `iv-percent.min`~`iv-percent.max`（默认 50%~100%）
+  在父本该项 IV 的比例区间里取点；闪光的单 / 双项继承另有 `shiny.single-bonus` / `shiny.double-bonus`。
+- **属性洗练**（`/pu reroll`，槽 22）：花金币 + 粘剂把一只精灵的性格 / 特性 / 单项个体值重掷；
+  `improve-only` 打开时只会掷出不低于当前值的结果。
+- **分解回收**（`/pu salvage`，槽 21）：把一只精灵拆成金币 + 粘剂，返还比例按星级在
+  `salvage.sticker`（粘剂张数表）与 `salvage.money-percent`（金币返还百分比）里配。
+- **粘剂合成**（`/pu craft`，槽 23）：低阶粘剂 + 金币换高阶，配方写在 `sticker-craft.recipes`。
+- **每日委托**（`/pu quest`，槽 24）：每天按 `quest.daily-amount` 确定性生成几条（按 UUID + 日期，
+  同一人同一天永远同一组），完成后回界面交付领奖；`/pu questreset` 可作废当天全部委托。
+- **合成图鉴**（`/pu dex`，槽 25）：记录「合出过哪些种族、各多少次」，按 `dex.rewards`
+  （默认 5 / 10 / 20 种）发里程碑奖励；判重压在数据库主键上（`INSERT OR IGNORE`），
+  连点两下不会重复发奖。
 
 第七轮：
 
@@ -85,25 +91,6 @@ Pixelmon（1.12.2）服务器的**精灵合成**插件。由原始 jar `PokeUtil
 | `Compound.log.enabled` | 关闭合成流水日志（`/pu history`·`stats`·`top` 随之无数据） |
 
 关掉开关**不会删数据**：图鉴记录、委托进度、已领里程碑都原样躺在库里，重新打开就接着用。
-
-第四轮四组新玩法（合成主界面槽 20~25 六个入口；配置在 `Compound` 段的
-`inherit` / `reroll` / `salvage` / `sticker-craft` / `quest` / `dex` 六块）：
-
-- **属性继承**（`Compound.inherit`）：合成时把**父本**的性格 / 特性 / 个体值继承给产物。
-  界面里逐项勾选，可用 `max-picks` 限制同时继承几项；来源可以是父本 A 或父本 B（也可随机）。
-  特性**按槽位继承**（0 = 普通特性、1 = 隐藏特性），而不是按名字 —— 产物是另一个种族，
-  父本的特性名在产物身上往往不存在。个体值按 `iv-percent.min`~`iv-percent.max`（默认 50%~100%）
-  在父本该项 IV 的比例区间里取点；闪光的单 / 双项继承另有 `shiny.single-bonus` / `shiny.double-bonus` 加成。
-- **属性洗练**（`/pu reroll`）：花金币 + 粘剂，把一只精灵的性格 / 特性 / 单项个体值重掷。
-  `improve-only` 打开时只会掷出不低于当前值的结果。
-- **分解回收**（`/pu salvage`）：把一只精灵拆成金币 + 粘剂，返还比例按星级在
-  `salvage.sticker`（粘剂张数表）与 `salvage.money-percent`（金币返还百分比）里配。
-- **粘剂合成**（`/pu craft`）：用低阶粘剂 + 金币换高阶粘剂，配方写在 `sticker-craft.recipes`。
-- **每日委托**（`/pu quest`）：每天按 `quest.daily-amount` 生成固定几条委托（按 UUID + 日期**确定性**
-  生成，同一人同一天永远同一组），完成后回界面交付领奖；`/pu questreset` 可作废当天全部委托。
-- **合成图鉴**（`/pu dex`）：记录每个玩家「合成过哪些种族、各多少次」，按
-  `dex.rewards`（默认 5 / 10 / 20 种）发里程碑奖励。判重交给数据库主键
-  （`INSERT OR IGNORE`），连点两下不会重复发奖。
 
 ## 命令与权限
 
@@ -702,6 +689,17 @@ if (!getConfig().isConfigurationSection("Compound.xxx.rewards")) {
 一律用 `isConfigurationSection` / `contains` 判存在性，**禁止**用
 `getConfigurationSection(...) == null` 当条件 —— 它是个恒假条件。
 
+补充两点（实战里都用得上）：
+
+- 已经用了 section 的地方，判空要写成 `section == null || section.getKeys(false).isEmpty()`。
+  全插件只有 `getDexRewards()` 一处踩过（已修），就是上面那个「奖励档位: 0 个」。
+- 更稳的做法是**干脆不用 section**：`loadStickerRecipes()` 用 `getMapList(path)` + `isEmpty()` ——
+  第 19 条已经证明双参 `get` 不回退默认，所以 `getMapList` 在缺键时**老老实实返回空表**；
+  `loadQuestTypes()` 是另一种安全写法：逐键 `section.get(key + ".weight")`，
+  段为空时每个字段各自回退，所以它一开始就是对的。
+- 哨兵回归项：T 组那条「奖励档位回退出厂 3 档」。测试服磁盘上那份 `config.yml`
+  **故意不含 `Compound.dex` 段**，正好持续守着这个行为。
+
 ### 20. 数据层再进一步：SQLite / MySQL 可切换（`data/Storage.java`）
 
 第三轮把存储从 YAML 换成了 SQLite，但插件各处直接引用 `SqliteStorage` 这个具体类。
@@ -875,40 +873,6 @@ MySQL 侧有四个坑，都收敛在 `MysqlStorage` 里：
 - `handleGiveCommand` 的兜底解析在**正版验证模式**下不再调 `Bukkit.getOfflinePlayer`
   （那会同步请求 Mojang 的 profile 接口，网络不好时能把主线程卡住几秒）。
   离线模式行为不变。
-### 19b. ⚠️【同族、但更凶险】`getConfigurationSection` 遇到缺键会**凭空造一个空段**
-
-**症状**：老服的 `config.yml` 有 `Compound` 段、但没有后来新增的某个子段
-（第四轮实际是 `Compound.dex.rewards`）时，该功能**静默变空**：图鉴界面显示
-「奖励档位: 0 个」，三个里程碑格子退化成灰玻璃，玩家点什么都没反应、也没有任何报错。
-它不报错、不写日志，比第 19 条更难查。
-
-**根因**（`javap -c` 逐条核对过 CatServer 1.12.2 的 `MemorySection#getConfigurationSection`）：
-
-```
-get(path, null)                       // 本段没有 -> null
-  ↓ null 分支
-val = get(path, getDefault(path))     // getDefault 命中的是 **jar 内置 config.yml**，非 null
-  ↓ val instanceof ConfigurationSection == true
-return createSection(path)            // ← 在**当前配置里**新建一个空段返回
-```
-
-也就是说，只要 jar 内置 `config.yml` 里有这个段，`getConfigurationSection(...)` 就
-**永远不会返回 null** —— 它返回一个「非 null 但 `getKeys()` 为空」的占位段。
-于是形如 `if (section == null) { 用默认值 } else { 遍历 section }` 的写法必然走 else 分支、
-遍历到 0 项，默认值永远轮不到。
-
-**规避约定**：
-
-- 判断「这段到底配没配」要用 `section == null || section.getKeys(false).isEmpty()`，
-  不能只判 `null`。全插件只有 `getDexRewards()` 一处踩过（已修）。
-- 更稳的写法是**别用 section**：像 `loadStickerRecipes()` 那样用
-  `getMapList(path)` + `isEmpty()` 判空 —— 第 19 条已经证明了双参 `get` 不回退默认，
-  所以 `getMapList` 在缺键时**老老实实返回空表**，`isEmpty()` 反而可靠。
-  `loadQuestTypes()` 是另一种安全写法：逐键 `section.get(key + ".weight")`，
-  段为空时每个字段各自回退，所以它一开始就是对的。
-- 回归项 **N72** 里那条「奖励档位回退出厂 3 档」是这条的哨兵，
-  测试服磁盘上那份 `config.yml` **故意不含 `Compound.dex` 段**，正好持续守着这个行为。
-
 ### 28. 第四轮：六组玩法（属性继承 / 属性洗练 / 分解回收 / 粘剂合成链 / 每日委托 / 合成图鉴）
 
 第三轮解决的是「界面好看、运营看得见」，但**玩**这件事本身还是空的：
@@ -943,95 +907,6 @@ return createSection(path)            // ← 在**当前配置里**新建一个�
 漏一个就会在关掉那个子界面时把整个合成会话误删（该插件最容易复发的 bug）。
 现在它列的是 **9 个**：继承 / 三种选精灵（分解·洗练·交付）/ 分解确认 / 洗练面板 /
 委托 / 粘剂合成 / 图鉴（第七轮的电脑盒子选料界面也在这个集合里）。
-
-## 配置一览（第三轮新增键）
-
-| 键 | 默认 | 说明 |
-| --- | --- | --- |
-| `Compound.material-count` | `2` | 需要的同星级材料数量（1 或 2） |
-| `Compound.sticker-required` | `true` | 是否必须放粘剂；`false` 时粘剂变可选加成 |
-| `Compound.refund.mode` | `money` | `money` / `sticker` / `both` |
-| `Compound.refund.sticker-type` | `PT` | 送哪种粘剂（键名取自 `Compound.stickers`） |
-| `Compound.refund.sticker-amount` | `1` | 送几个 |
-| `Compound.refund.min-star` | `0` | 材料星级 ≥ 本值才送（0 = 不限） |
-| `Compound.refund.voucher-on-failure` | `true` | 用券失败时退还券（背包满则掉在脚下） |
-| `Compound.groups` | `[]` | 权限组折扣与加成，示例见 `config.yml` 注释 |
-| `Compound.vouchers` | `[]` | 合成券定义，示例见 `config.yml` 注释 |
-| `Compound.preview.enabled` | `true` | 是否显示「产出预览」按钮 |
-| `Compound.preview.page-size` | `45` | 预览每页条数 |
-| `Compound.pity.notify` | `chat` | `chat` / `actionbar` / `both` / `none` |
-| `Compound.pity.message` | 见 `config.yml` | 保底提示文案，占位符 `{streak}` / `{threshold}` / `{left}` |
-| `Compound.log.keep-days` | `30` | 开机清理超过 N 天的日志（0 = 不清理） |
-| `Compound.history.size` | `10` | `/pu history` 默认条数（上限 50） |
-| `Compound.history.max-scan-lines` | `50000` | `/pu stats`、`/pu top` 最多往回扫多少行 |
-| `Compound.feedback.sounds.open` | `BLOCK_CHEST_OPEN` | 开界面；**留空 = 不发声** |
-| `Compound.feedback.sounds.select` | `UI_BUTTON_CLICK` | 选择精灵 / 粘剂 |
-| `Compound.feedback.sounds.success` | `ENTITY_PLAYER_LEVELUP` | 合成成功 |
-| `Compound.feedback.sounds.fail` | `BLOCK_ANVIL_LAND` | 合成失败 |
-| `Compound.feedback.sounds.volume` | `1.0` | 音量 |
-| `Compound.feedback.sounds.pitch` | `1.0` | 音调 |
-| `Compound.feedback.title.enabled` | `true` | 成功 Title 开关（关掉不影响音效） |
-| `Compound.feedback.title.title` | `§a合成成功` | 主标题 |
-| `Compound.feedback.title.subtitle` | `§f{star} §f{pokemon}` | 副标题，占位符 `{star}` / `{pokemon}` |
-| `Compound.feedback.title.fade-in` / `stay` / `fade-out` | `5` / `30` / `10` | Title 时长（tick） |
-
-## 配置一览（第四轮新增键）
-
-> 同样遵守修复记录第 19 条的约定：**代码里的字面量默认值必须与出厂 `config.yml` 完全一致**，
-> 否则「换了 jar 但沿用旧 config.yml」的服上，这些键会静默失效。
-
-| 键 | 默认 | 说明 |
-| --- | --- | --- |
-| `Compound.inherit.enabled` | `true` | 关掉后槽 20 点击只提示「功能已关闭」，合成退回「产物属性完全随机」 |
-| `Compound.inherit.max-picks` | `1` | 一次最多同时继承几项（性格 / 特性 / 个体值）；`0` = 关闭 |
-| `Compound.inherit.iv-percent.min` / `.max` | `50` / `100` | 个体值在「父本区间」里按比例取点的上下限 |
-| `Compound.inherit.shiny.single-bonus` | `5` | 单只父本闪光带来的产物闪光加成（%） |
-| `Compound.inherit.shiny.double-bonus` | `25` | 两只父本都闪光时的加成（%） |
-| `Compound.reroll.enabled` | `true` | 洗练开关 |
-| `Compound.reroll.price` | `20000` | 每次洗练金币 |
-| `Compound.reroll.sticker-type` | `PT` | 每次洗练消耗的粘剂（键名取自 `Compound.stickers`） |
-| `Compound.reroll.sticker-amount` | `1` | 消耗几个（`0` 则只扣金币） |
-| `Compound.reroll.iv-min` / `.max` | `0` / `31` | 单项 IV 重掷区间（Pixelmon 合法区间 0~31） |
-| `Compound.reroll.improve-only` | `false` | `true` = 只保留更好的结果（纯提升，不会洗坏） |
-| `Compound.salvage.enabled` | `true` | 分解开关 |
-| `Compound.salvage.sticker.<星级>` | `1:0 2:0 3:1 4:2 5:3 6:5 7:8` | 按星级返还的粘剂张数（没写的星级按 0） |
-| `Compound.salvage.sticker-type` | `PT` | 返还哪种粘剂 |
-| `Compound.salvage.money-percent` | `10` | 金币返还 = 该星级合成价格的百分之几 |
-| `Compound.sticker-craft.enabled` | `true` | 粘剂合成开关 |
-| `Compound.sticker-craft.recipes[]` | 1 条 `PT→JL` 示例 | 每条 = `from` / `to` / `amount` / `result` / `money` |
-| `Compound.quest.enabled` | `true` | 每日委托开关 |
-| `Compound.quest.daily-amount` | `3` | 每天生成几条 |
-| `Compound.quest.types.<TYPE>.weight` | 见 `config.yml` | 生成权重（`0` = 不生成该类） |
-| `Compound.quest.types.<TYPE>.targets` | 见 `config.yml` | 目标次数档次；`SUBMIT` 另有 `star` 门槛 |
-| `Compound.quest.types.<TYPE>.display` | 见 `config.yml` | 文案，占位符 `{target}` / `{star}` |
-| `Compound.quest.reward.money` | `20000` | 单条委托的金币奖励 |
-| `Compound.quest.reward.sticker-type` / `.sticker-amount` | `PT` / `2` | 单条委托的粘剂奖励 |
-| `Compound.dex.enabled` | `true` | 合成图鉴开关 |
-| `Compound.dex.rewards.<种类数>` | `5` / `10` / `20` 三档 | 每档 = `money` / `sticker-type` / `sticker-amount`；每档只能领一次 |
-
-## 配置一览（第七轮新增键）
-
-| 键 | 默认 | 说明 |
-| --- | --- | --- |
-| `Compound.pc.enabled` | `true` | 是否允许从电脑盒子选材料。关掉后选料界面**不画**入口按钮（那一格留白，点上去无反应） |
-| `Compound.pity.threshold-by-star` | `{}` | 按原料星级档单独定保底阈值，例如 `1: 3` / `6: 8`；**没列出的档位回退到 `threshold` 单值** |
-
-## 配置一览（存储 / 后台）
-
-| 键 | 默认 | 说明 |
-| --- | --- | --- |
-| `Storage.type` | `sqlite` | `sqlite` / `mysql` |
-| `Storage.sqlite.file` | `pokeutils.db` | 数据库文件（相对路径基于插件数据目录，也可写绝对路径） |
-| `Storage.sqlite.checkpoint-minutes` | `10` | 把 WAL 合并回主库并截断的间隔（`0` = 不开启） |
-| `Storage.mysql.host` / `port` / `database` / `user` / `password` | `127.0.0.1` / `3306` / `pokeutils` / `root` / 空 | 连接参数 |
-| `Storage.mysql.table-prefix` | `pu_` | 表名前缀，用来和同库其它插件隔开 |
-| `Storage.mysql.use-ssl` / `server-timezone` | `false` / 空 | MySQL 8 的 cj 驱动通常要填时区（如 `Asia/Shanghai`） |
-| `Storage.mysql.pool-size` | `4` | 连接池上限（写入走单线程，4 足够） |
-| `Storage.mysql.connect-timeout-ms` / `borrow-timeout-ms` | `5000` / `3000` | 建连接 / 借连接的等待上限 |
-| `Storage.mysql.fallback-to-sqlite` | `true` | 连不上时是否降到本地 SQLite。**`true` 意味着带着另一份数据上线**，两边会分叉；要「宁可不可用也不带错数据」就改 `false` |
-| `Storage.async.write-behind` | `auto` | `auto`（本地同步写穿 / 网络异步写回）/ `always` / `never` |
-| `Storage.async.flush-timeout-ms` | `5000` | 关服时最多等多久让写回队列排空 |
-| `Storage.async.worker-threads` | `2` | 后台计算线程数（重建流水索引、重载配置） |
 
 ### 29. 第七轮：电脑盒子选料（`data/MaterialRef` + `data/MaterialAccess`）
 
@@ -1168,7 +1043,97 @@ return createSection(path)            // ← 在**当前配置里**新建一个�
 - **`/pu storage` 已经能看见这件事。** 缓存玩家数、未落盘条目、写队列积压、连续失败、熔断剩余时间、
   流水索引条数都在里面 —— 判断「是不是在泄漏」看它比翻日志快。
 
+## 配置一览（第三轮新增键）
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `Compound.material-count` | `2` | 需要的同星级材料数量（1 或 2） |
+| `Compound.sticker-required` | `true` | 是否必须放粘剂；`false` 时粘剂变可选加成 |
+| `Compound.refund.mode` | `money` | `money` / `sticker` / `both` |
+| `Compound.refund.sticker-type` | `PT` | 送哪种粘剂（键名取自 `Compound.stickers`） |
+| `Compound.refund.sticker-amount` | `1` | 送几个 |
+| `Compound.refund.min-star` | `0` | 材料星级 ≥ 本值才送（0 = 不限） |
+| `Compound.refund.voucher-on-failure` | `true` | 用券失败时退还券（背包满则掉在脚下） |
+| `Compound.groups` | `[]` | 权限组折扣与加成，示例见 `config.yml` 注释 |
+| `Compound.vouchers` | `[]` | 合成券定义，示例见 `config.yml` 注释 |
+| `Compound.preview.enabled` | `true` | 是否显示「产出预览」按钮 |
+| `Compound.preview.page-size` | `45` | 预览每页条数 |
+| `Compound.pity.notify` | `chat` | `chat` / `actionbar` / `both` / `none` |
+| `Compound.pity.message` | 见 `config.yml` | 保底提示文案，占位符 `{streak}` / `{threshold}` / `{left}` |
+| `Compound.log.keep-days` | `30` | 开机清理超过 N 天的日志（0 = 不清理） |
+| `Compound.history.size` | `10` | `/pu history` 默认条数（上限 50） |
+| `Compound.history.max-scan-lines` | `50000` | `/pu stats`、`/pu top` 最多往回扫多少行 |
+| `Compound.feedback.sounds.open` | `BLOCK_CHEST_OPEN` | 开界面；**留空 = 不发声** |
+| `Compound.feedback.sounds.select` | `UI_BUTTON_CLICK` | 选择精灵 / 粘剂 |
+| `Compound.feedback.sounds.success` | `ENTITY_PLAYER_LEVELUP` | 合成成功 |
+| `Compound.feedback.sounds.fail` | `BLOCK_ANVIL_LAND` | 合成失败 |
+| `Compound.feedback.sounds.volume` | `1.0` | 音量 |
+| `Compound.feedback.sounds.pitch` | `1.0` | 音调 |
+| `Compound.feedback.title.enabled` | `true` | 成功 Title 开关（关掉不影响音效） |
+| `Compound.feedback.title.title` | `§a合成成功` | 主标题 |
+| `Compound.feedback.title.subtitle` | `§f{star} §f{pokemon}` | 副标题，占位符 `{star}` / `{pokemon}` |
+| `Compound.feedback.title.fade-in` / `stay` / `fade-out` | `5` / `30` / `10` | Title 时长（tick） |
+
+## 配置一览（第四轮新增键）
+
+> 同样遵守修复记录第 19 条的约定：**代码里的字面量默认值必须与出厂 `config.yml` 完全一致**，
+> 否则「换了 jar 但沿用旧 config.yml」的服上，这些键会静默失效。
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `Compound.inherit.enabled` | `true` | 关掉后槽 20 点击只提示「功能已关闭」，合成退回「产物属性完全随机」 |
+| `Compound.inherit.max-picks` | `1` | 一次最多同时继承几项（性格 / 特性 / 个体值）；`0` = 关闭 |
+| `Compound.inherit.iv-percent.min` / `.max` | `50` / `100` | 个体值在「父本区间」里按比例取点的上下限 |
+| `Compound.inherit.shiny.single-bonus` | `5` | 单只父本闪光带来的产物闪光加成（%） |
+| `Compound.inherit.shiny.double-bonus` | `25` | 两只父本都闪光时的加成（%） |
+| `Compound.reroll.enabled` | `true` | 洗练开关 |
+| `Compound.reroll.price` | `20000` | 每次洗练金币 |
+| `Compound.reroll.sticker-type` | `PT` | 每次洗练消耗的粘剂（键名取自 `Compound.stickers`） |
+| `Compound.reroll.sticker-amount` | `1` | 消耗几个（`0` 则只扣金币） |
+| `Compound.reroll.iv-min` / `.max` | `0` / `31` | 单项 IV 重掷区间（Pixelmon 合法区间 0~31） |
+| `Compound.reroll.improve-only` | `false` | `true` = 只保留更好的结果（纯提升，不会洗坏） |
+| `Compound.salvage.enabled` | `true` | 分解开关 |
+| `Compound.salvage.sticker.<星级>` | `1:0 2:0 3:1 4:2 5:3 6:5 7:8` | 按星级返还的粘剂张数（没写的星级按 0） |
+| `Compound.salvage.sticker-type` | `PT` | 返还哪种粘剂 |
+| `Compound.salvage.money-percent` | `10` | 金币返还 = 该星级合成价格的百分之几 |
+| `Compound.sticker-craft.enabled` | `true` | 粘剂合成开关 |
+| `Compound.sticker-craft.recipes[]` | 1 条 `PT→JL` 示例 | 每条 = `from` / `to` / `amount` / `result` / `money` |
+| `Compound.quest.enabled` | `true` | 每日委托开关 |
+| `Compound.quest.daily-amount` | `3` | 每天生成几条 |
+| `Compound.quest.types.<TYPE>.weight` | 见 `config.yml` | 生成权重（`0` = 不生成该类） |
+| `Compound.quest.types.<TYPE>.targets` | 见 `config.yml` | 目标次数档次；`SUBMIT` 另有 `star` 门槛 |
+| `Compound.quest.types.<TYPE>.display` | 见 `config.yml` | 文案，占位符 `{target}` / `{star}` |
+| `Compound.quest.reward.money` | `20000` | 单条委托的金币奖励 |
+| `Compound.quest.reward.sticker-type` / `.sticker-amount` | `PT` / `2` | 单条委托的粘剂奖励 |
+| `Compound.dex.enabled` | `true` | 合成图鉴开关 |
+| `Compound.dex.rewards.<种类数>` | `5` / `10` / `20` 三档 | 每档 = `money` / `sticker-type` / `sticker-amount`；每档只能领一次 |
+
+## 配置一览（第七轮新增键）
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `Compound.pc.enabled` | `true` | 是否允许从电脑盒子选材料。关掉后选料界面**不画**入口按钮（那一格留白，点上去无反应） |
+| `Compound.pity.threshold-by-star` | `{}` | 按原料星级档单独定保底阈值，例如 `1: 3` / `6: 8`；**没列出的档位回退到 `threshold` 单值** |
+
+## 配置一览（存储 / 后台）
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `Storage.type` | `sqlite` | `sqlite` / `mysql` |
+| `Storage.sqlite.file` | `pokeutils.db` | 数据库文件（相对路径基于插件数据目录，也可写绝对路径） |
+| `Storage.sqlite.checkpoint-minutes` | `10` | 把 WAL 合并回主库并截断的间隔（`0` = 不开启） |
+| `Storage.mysql.host` / `port` / `database` / `user` / `password` | `127.0.0.1` / `3306` / `pokeutils` / `root` / 空 | 连接参数 |
+| `Storage.mysql.table-prefix` | `pu_` | 表名前缀，用来和同库其它插件隔开 |
+| `Storage.mysql.use-ssl` / `server-timezone` | `false` / 空 | MySQL 8 的 cj 驱动通常要填时区（如 `Asia/Shanghai`） |
+| `Storage.mysql.pool-size` | `4` | 连接池上限（写入走单线程，4 足够） |
+| `Storage.mysql.connect-timeout-ms` / `borrow-timeout-ms` | `5000` / `3000` | 建连接 / 借连接的等待上限 |
+| `Storage.mysql.fallback-to-sqlite` | `true` | 连不上时是否降到本地 SQLite。**`true` 意味着带着另一份数据上线**，两边会分叉；要「宁可不可用也不带错数据」就改 `false` |
+| `Storage.async.write-behind` | `auto` | `auto`（本地同步写穿 / 网络异步写回）/ `always` / `never` |
+| `Storage.async.flush-timeout-ms` | `5000` | 关服时最多等多久让写回队列排空 |
+| `Storage.async.worker-threads` | `2` | 后台计算线程数（重建流水索引、重载配置） |
+
 ## 编译桩的类型种类（重要）
+
 Pixelmon 1.12.2 里 `Pokemon`、`PlayerPartyStorage`、`PokemonFactory` 都是 **类**（原插件字节码用
 `invokevirtual` 调用）。编译桩必须同样声明为 `class`：
 
