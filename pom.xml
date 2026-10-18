@@ -10,7 +10,15 @@
     <packaging>pom</packaging>
 
     <name>PokeUtils</name>
-    <description>Pixelmon 精灵合成插件（反编译复原版）</description>
+    <description>Pixelmon 精灵合成插件</description>
+
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
 
     <modules>
         <module>stub-api</module>

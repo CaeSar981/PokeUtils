@@ -2,6 +2,7 @@
 
 [![build](https://github.com/CaeSar981/PokeUtils/actions/workflows/build.yml/badge.svg)](https://github.com/CaeSar981/PokeUtils/actions/workflows/build.yml)
 [![release](https://img.shields.io/github/v/release/CaeSar981/PokeUtils?display_name=tag)](https://github.com/CaeSar981/PokeUtils/releases)
+[![license](https://img.shields.io/github/license/CaeSar981/PokeUtils)](LICENSE)
 
 面向 **Pixelmon 1.12.2** 服务端的精灵合成插件：两只同星级精灵 + 一个粘剂，合成出一只更高星级的精灵。
 
@@ -165,3 +166,7 @@ Storage:
 
 全部配置键的默认值、逐项说明与原位注释都在
 [`plugin/src/main/resources/config.yml`](plugin/src/main/resources/config.yml)，以那份为准。
+
+## 许可证
+
+[MIT](LICENSE) © 2026 CaeSar981
