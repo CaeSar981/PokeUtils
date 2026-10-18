@@ -155,6 +155,7 @@ Storage:
 | 触发 | 行为 |
 | --- | --- |
 | push 到 `main` / 提交 PR | 编译一次，jar 作为 artifact 保留 400 天（平台上限） |
+| push 到 `main`（任意提交） | 额外把产物挂到滚动预发布 [`latest`](https://github.com/CaeSar981/PokeUtils/releases/tag/latest)，附件**不过期** |
 | push 一个 `v*` 标签 | 编译，并把 jar + `.sha256` 挂到同名 Release（已存在则覆盖附件） |
 | push 到 `main` 且 `plugin.yml` 的 `version` 变了 | 自动打 `v<版本>` 标签并发版 |
 | 手动 Run workflow | 只构建 |
@@ -162,6 +163,10 @@ Storage:
 **发版的唯一动作**：改 `plugin/src/main/resources/plugin.yml` 里的 `version`，然后 push 到 `main`。
 工作流会现场下载 spigot-api 快照与 sqlite-jdbc（这两个二进制不入库），再调用 `build.sh`，
 因此 CI 与本地构建走的是同一套脚本、同一套自检。
+
+> 想拿最新构建又不想翻 Actions 的话，用固定链接：
+> `https://github.com/CaeSar981/PokeUtils/releases/download/latest/PokeUtils-remake-latest.jar`
+> —— 每次 push 到 `main` 自动覆盖，指向当次构建。
 
 ## 文档索引
 

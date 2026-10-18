@@ -3,6 +3,7 @@
 #
 #  三种触发：
 #    · push 到 main / PR      -> 编译一次，产物作为 artifact 挂 400 天（平台上限）
+#    · push 到 main（任意提交）-> 额外把产物挂到滚动预发布 `latest`，附件无过期时间
 #    · push tag v*            -> 编译，并把 jar 挂到对应的 GitHub Release（已存在则覆盖附件）
 #    · push 到 main 但版本号变了 -> 自动打 tag + 发版（版本号取自 plugin.yml）
 #    · workflow_dispatch      -> 手动跑一次
@@ -175,4 +176,38 @@ jobs:
               --title "PokeUtils-remake $TAG" \
               --generate-notes
             echo "::notice::已发布 $TAG"
+          fi
+
+      # artifact 有 400 天上限（且会被仓库设置进一步夹持，实测夹到 90 天），Release 附件则**没有过期时间**。
+      # 这一步把每次 main 构建都挂到滚动预发布 `latest` 上，覆盖同名附件，于是：
+      #   https://github.com/<owner>/<repo>/releases/download/latest/PokeUtils-remake-latest.jar
+      # 是一个永远指向最新构建的固定链接，不受 artifact 过期影响。
+      # 标记为 prerelease，所以不会被 GitHub 认成 "Latest release"，带版本号的正式版仍然是门面。
+      - name: Update rolling latest pre-release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          V='${{ needs.build.outputs.version }}'
+          cp "out/PokeUtils-remake-${V}.jar" out/PokeUtils-remake-latest.jar
+          ( cd out && sha256sum PokeUtils-remake-latest.jar > PokeUtils-remake-latest.jar.sha256 )
+          NOTES="每次 push 到 main 自动更新的滚动构建，可能不稳定，请勿直接用于生产。
+
+          版本号：\`${V}\`
+          提交：\`${GITHUB_SHA}\`
+
+          正式版请到 [Releases](https://github.com/${GITHUB_REPOSITORY}/releases) 下载带版本号的包。"
+
+          if gh release view latest >/dev/null 2>&1; then
+            gh release upload latest \
+              out/PokeUtils-remake-latest.jar out/PokeUtils-remake-latest.jar.sha256 --clobber
+            gh release edit latest --prerelease --title "latest（自动构建）" --notes "$NOTES"
+            echo "::notice::已更新滚动 latest"
+          else
+            gh release create latest \
+              out/PokeUtils-remake-latest.jar out/PokeUtils-remake-latest.jar.sha256 \
+              --target "$GITHUB_SHA" --prerelease \
+              --title "latest（自动构建）" --notes "$NOTES"
+            echo "::notice::已创建滚动 latest"
           fi
