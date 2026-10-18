@@ -1,0 +1,167 @@
+# ---------------------------------------------------------------------------
+#  PokeUtils-remake 构建 / 发版流水线
+#
+#  三种触发：
+#    · push 到 main / PR      -> 编译一次，产物作为 artifact 挂 30 天
+#    · push tag v*            -> 编译，并把 jar 挂到对应的 GitHub Release（已存在则覆盖附件）
+#    · push 到 main 但版本号变了 -> 自动打 tag + 发版（版本号取自 plugin.yml）
+#    · workflow_dispatch      -> 手动跑一次
+#
+#  为什么要在 CI 里现场下载依赖：
+#    spigot-api 与 sqlite-jdbc 都是第三方二进制（合计 22MB），按 .gitignore 的约定
+#    不入库；build.sh 又要求本机已有它们。这里把「下载」这一步显式放在构建之前，
+#    任何人 fork 之后点一下就能出包，不需要在自己机器上准备 maven 仓库。
+#
+#  注意：build.sh 里的路径转换（cygpath / classpath 分隔符）已做跨平台处理，
+#  因此这个 workflow 可以跑在 ubuntu 上，和作者本机的 Git Bash 行为一致。
+# ---------------------------------------------------------------------------
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# 发版要写 Releases，所以需要 contents: write
+permissions:
+  contents: write
+
+# 同一分支/标签上后一次推送会取消前一次未跑完的构建（tag 构建同样适用）
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 与作者本机用于验证的版本保持一致，改这里就够了
+  SPIGOT_API_VERSION: 1.12.2-R0.1-SNAPSHOT
+  SQLITE_JDBC_VERSION: 3.42.0.0
+  # build.sh 的默认产物名（它内部是写死的），发版时再改成带版本号的名字
+  RAW_JAR: dist/PokeUtils-remake-1.0.0-SNAPSHOT.jar
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '8'
+
+      # 版本号的唯一来源是 plugin.yml —— 改它一个数字就会触发一次发版
+      - name: Read version from plugin.yml
+        id: version
+        run: |
+          set -euo pipefail
+          V=$(sed -n 's/^version:[[:space:]]*//p' plugin/src/main/resources/plugin.yml | head -1 | tr -d " \r\"'")
+          if [ -z "$V" ]; then
+            echo "::error::没能从 plugin/src/main/resources/plugin.yml 读到 version"
+            exit 1
+          fi
+          echo "value=$V" >> "$GITHUB_OUTPUT"
+          echo "插件版本号：$V"
+
+      - name: Download compile-time dependencies
+        run: |
+          set -euo pipefail
+          mkdir -p libs
+
+          echo "==> sqlite-jdbc ${SQLITE_JDBC_VERSION}"
+          curl -fsSL --retry 3 --retry-delay 2 \
+            -o "libs/sqlite-jdbc-${SQLITE_JDBC_VERSION}.jar" \
+            "https://repo1.maven.org/maven2/org/xerial/sqlite-jdbc/${SQLITE_JDBC_VERSION}/sqlite-jdbc-${SQLITE_JDBC_VERSION}.jar"
+
+          echo "==> spigot-api ${SPIGOT_API_VERSION}"
+          BASE="https://hub.spigotmc.org/nexus/content/repositories/snapshots/org/spigotmc/spigot-api/${SPIGOT_API_VERSION}"
+          curl -fsSL --retry 3 --retry-delay 2 -o spigot-metadata.xml "${BASE}/maven-metadata.xml"
+          # SNAPSHOT 仓库只提供带时间戳的文件名，所以先读元数据再拼 URL
+          TS=$(grep -o '<timestamp>[^<]*' spigot-metadata.xml | head -1 | cut -d'>' -f2)
+          BN=$(grep -o '<buildNumber>[^<]*' spigot-metadata.xml | head -1 | cut -d'>' -f2)
+          if [ -z "$TS" ] || [ -z "$BN" ]; then
+            echo "::error::解析 spigot-api 快照元数据失败"
+            cat spigot-metadata.xml
+            exit 1
+          fi
+          curl -fsSL --retry 3 --retry-delay 2 -o spigot-api.jar \
+            "${BASE}/spigot-api-1.12.2-R0.1-${TS}-${BN}.jar"
+
+          ls -l spigot-api.jar libs/sqlite-jdbc-*.jar
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          # build.sh 默认去找作者本机 Git Bash 下的 JDK 8，这里换成交给 setup-java 的那个
+          JDK_HOME="$JAVA_HOME" SPIGOT_API_JAR="$PWD/spigot-api.jar" bash build.sh
+
+      # 产物改名成带版本号的正式名字，同时出一个 sha256 方便下载后校验
+      - name: Collect artifact
+        run: |
+          set -euo pipefail
+          V="${{ steps.version.outputs.value }}"
+          mkdir -p out
+          JAR="out/PokeUtils-remake-${V}.jar"
+          cp "$RAW_JAR" "$JAR"
+          ( cd out && sha256sum "PokeUtils-remake-${V}.jar" > "PokeUtils-remake-${V}.jar.sha256" )
+          echo "==> 产物"
+          ls -l out
+          echo "==> 顶层内容抽查"
+          unzip -l "$JAR" | grep -E "plugin\.yml|config\.yml|YamlStorage\.class" || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PokeUtils-remake-${{ steps.version.outputs.value }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish release
+    needs: build
+    # PR 不发版；tag 推送发对应版本；main 上版本号变了自动发版
+    if: "github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: PokeUtils-remake-${{ needs.build.outputs.version }}
+          path: out
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          V='${{ needs.build.outputs.version }}'
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="v${V}"
+          fi
+          echo "版本号=$V 标签=$TAG"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+              # 显式推了这个 tag，说明要重出一份产物，覆盖附件
+              gh release upload "$TAG" out/*.jar out/*.sha256 --clobber
+              echo "::notice::已覆盖 $TAG 的附件"
+            else
+              # main 上版本号没变，说明只是普通提交，不重复发版
+              echo "::notice::Release $TAG 已存在且版本号未变，跳过发版（改 plugin.yml 的 version 即可触发）"
+            fi
+          else
+            gh release create "$TAG" out/*.jar out/*.sha256 \
+              --target "$GITHUB_SHA" \
+              --title "PokeUtils-remake $TAG" \
+              --generate-notes
+            echo "::notice::已发布 $TAG"
+          fi

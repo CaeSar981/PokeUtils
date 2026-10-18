@@ -27,6 +27,22 @@
 # ---------------------------------------------------------------------------
 set -e
 
+# ---------------------------------------------------------------------------
+#  平台差异：路径写法与 classpath 分隔符
+#
+#  在 Git Bash（Windows）里，java/javac 是原生 Windows 程序，必须喂 `C:/x/y`
+#  这种盘符路径，且 classpath 用 ';' 分隔；在 Linux/macOS 上恰好相反。
+#  GitHub Actions 跑在 ubuntu 上，所以这里必须两种都支持，不能直接调 cygpath。
+#  下面的 W() 就是唯一的路径转换入口 —— 新增路径参数时请一并走它。
+# ---------------------------------------------------------------------------
+if command -v cygpath >/dev/null 2>&1; then
+    W() { cygpath -w "$1"; }
+    CP_SEP=';'
+else
+    W() { printf '%s\n' "$1"; }
+    CP_SEP=':'
+fi
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 JDK="${JDK_HOME:-/c/Program Files/Eclipse Adoptium/jdk-8.0.504.1-hotspot}"
 JAVAC="$JDK/bin/javac"
@@ -66,8 +82,8 @@ echo "==> 编译编译期桩 (stub-api)"
 ( cd "$STUB_SRC" && find . -name '*.java' ) > "$OUT/stub-sources.txt"
 ( cd "$STUB_SRC" && "$JAVAC" -J-Duser.language=en -J-Duser.country=US -nowarn -encoding UTF-8 \
     -source 1.8 -target 1.8 \
-    -cp "$(cygpath -w "$SPIGOT")" \
-    -d "$(cygpath -w "$OUT/stub")" "@$(cygpath -w "$OUT/stub-sources.txt")" )
+    -cp "$(W "$SPIGOT")" \
+    -d "$(W "$OUT/stub")" "@$(W "$OUT/stub-sources.txt")" )
 echo "    $(find "$OUT/stub" -name '*.class' | wc -l) 个 class"
 
 echo "==> 准备 SQLite 驱动（展开 / 裁剪 / 重定位）"
@@ -106,21 +122,21 @@ fi
 #    而插件 ClassLoader 会先委托父加载器；父能解析 org.sqlite.SQLiteConfig，
 #    我们 shade 进来的 3.42 就永远不会被用到 —— 运行期直接抛
 #    NoSuchMethodError: org.sqlite.SQLiteConfig.setBusyTimeout(I)V（3.24+ 才有）。
-"$PYTHON" "$HERE/tools/relocate.py" "$(cygpath -w "$OUT/sqlite")" "org/sqlite" "$RELOCATED"
+"$PYTHON" "$HERE/tools/relocate.py" "$(W "$OUT/sqlite")" "org/sqlite" "$RELOCATED"
 echo "    class $(find "$OUT/sqlite/$RELOCATED" -name '*.class' | wc -l) 个, native $(find "$OUT/sqlite/$RELOCATED/native" -type f | wc -l) 个"
 echo "    保留平台: $PLATFORMS"
 
 # 编译期 classpath 用重定位后的版本 —— 插件源码 import 的就是 $RELOCATED.*
 SQLITE_CP="$OUT/sqlite-relocated.jar"
 rm -f "$SQLITE_CP"
-"$JAR" cf "$(cygpath -w "$SQLITE_CP")" -C "$(cygpath -w "$OUT/sqlite")" .
+"$JAR" cf "$(W "$SQLITE_CP")" -C "$(W "$OUT/sqlite")" .
 
 echo "==> 编译插件本体"
 ( cd "$PLUGIN_SRC" && find . -name '*.java' ) > "$OUT/plugin-sources.txt"
 ( cd "$PLUGIN_SRC" && "$JAVAC" -J-Duser.language=en -J-Duser.country=US -nowarn -encoding UTF-8 \
     -source 1.8 -target 1.8 \
-    -cp "$(cygpath -w "$OUT/stub");$(cygpath -w "$SPIGOT");$(cygpath -w "$SQLITE_CP")" \
-    -d "$(cygpath -w "$OUT/classes")" "@$(cygpath -w "$OUT/plugin-sources.txt")" )
+    -cp "$(W "$OUT/stub")${CP_SEP}$(W "$SPIGOT")${CP_SEP}$(W "$SQLITE_CP")" \
+    -d "$(W "$OUT/classes")" "@$(W "$OUT/plugin-sources.txt")" )
 echo "    $(find "$OUT/classes" -name '*.class' | wc -l) 个 class"
 
 echo "==> 复制资源"
@@ -130,9 +146,9 @@ cp "$RES/config.yml" "$OUT/classes/"
 echo "==> 打包"
 mkdir -p "$(dirname "$DIST")"
 rm -f "$DIST"
-"$JAR" cf "$(cygpath -w "$DIST")" \
-    -C "$(cygpath -w "$OUT/classes")" . \
-    -C "$(cygpath -w "$OUT/sqlite")" .
+"$JAR" cf "$(W "$DIST")" \
+    -C "$(W "$OUT/classes")" . \
+    -C "$(W "$OUT/sqlite")" .
 echo "    产物: $DIST ($(stat -c%s "$DIST") 字节)"
 
 # 依赖桩不得混进产物
