@@ -1289,14 +1289,13 @@ SQLite 的公开方法都是 `synchronized`，MySQL 从连接池借连接。
 `PlayerData` 新增一个极小的入口方法：
 
 ```java
-private static void featureEntry(Inventory inv, int slot, boolean enabled,
-        ItemStack fallback, ItemStack icon) {
-    inv.setItem(slot, enabled ? icon : fallback);
+private static void featureEntry(Inventory inv, int slot, boolean enabled, ItemStack icon) {
+    inv.setItem(slot, enabled ? icon : null);
 }
 ```
 
 六处调用从 `inv.setItem(slot, button(...))` 改成
-`featureEntry(inv, slot, <开关>, fg, button(...))`。映射关系：
+`featureEntry(inv, slot, <开关>, button(...))`。映射关系：
 
 | 配置键 | 槽位 | 判定方法 |
 | --- | --- | --- |
@@ -1307,16 +1306,19 @@ private static void featureEntry(Inventory inv, int slot, boolean enabled,
 | `Compound.quest.enabled` | 24 | `isQuestEnabled()` |
 | `Compound.dex.enabled` | 25 | `isDexEnabled()` |
 
-点击侧**不需要改**：`openSubGuiIfEnabled` 本来就挡着，灰玻璃点上去不会有任何反应。
+点击侧**不需要改**：`openSubGuiIfEnabled` 本来就挡着，空格点上去不会有任何反应
+（主界面的 `onInventoryClick` 第一行就 `e.setCancelled(true)`，空格也放不进物品）。
 
-#### 36.3 为什么关闭时填灰玻璃而不是留空
+#### 36.3 关闭时该格彻底留空
 
 槽 20~25 不在 `openGui` 的 `fgslots` 铺底列表里 —— 那一排原本是装饰格，特意空出来给入口用。
-所以「关闭时什么都不画」会在界面中央留下一排黑洞，看起来像渲染错误。填一块与外框同款的
-灰玻璃（`STAINED_GLASS_PANE` data 15、显示名 `§a`）既让图标真正消失，又保持整排视觉完整。
+所以关闭时**这一格什么都不画**：既不是图标，也不补灰玻璃，界面上就是一块空位。
 
-作为对照，槽 40 的电脑盒子入口（`Compound.pc.enabled`）走的是「留空」路线 —— 那一格有铺底，
-留空不会露洞。两处做法不同是各自布局决定的，不是不一致。
+最初的实现是补一块与外框同款的灰玻璃（`STAINED_GLASS_PANE` data 15、显示名 `§a`），
+理由是「怕界面中央出现一排黑洞」。实测下来灰玻璃反而更像一个可以点的按钮，
+与「这个功能没开」的语义相反，因此按用户要求改成彻底留空。
+
+作为对照，槽 40 的电脑盒子入口（`Compound.pc.enabled`）本来就走「留空」路线。
 
 #### 36.4 为什么没加新配置项
 
@@ -1328,7 +1330,7 @@ private static void featureEntry(Inventory inv, int slot, boolean enabled,
 
 新增 `W 组`（7 条断言），验三条边界：
 
-- **W1**：关掉继承与委托后，槽 20 / 24 变成灰玻璃（`STAINED_GLASS_PANE data=15 name=§a`）；
+- **W1**：关掉继承与委托后，槽 20 / 24 彻底空着（`null` 或 `AIR`，既无图标也无灰玻璃）；
 - **W2**：槽 21 / 22 / 23 / 25 的图标都还在 —— 防止「一个开关把整排清掉」；
 - **W3**：点被隐藏的那一格仍停在合成主界面（不会误开子界面）；
 - **W4**：恢复开关后槽 20 / 24 的图标回来；
@@ -1337,8 +1339,10 @@ private static void featureEntry(Inventory inv, int slot, boolean enabled,
 选「继承 + 委托」做代表：前者在界面上带额外状态行（已选 N / M），后者走异步读库路径，
 两者被关掉时最容易顺手带出别的副作用。
 
-端到端基线 **749 → 756**（实测 756/756 全绿，MySQL 后端，144.4s，报告
-`plugins/PokeUtilsAutoTest/report-w-mysql-756of756.txt`）。
+端到端基线 **749 → 756**（实测 756/756 全绿，MySQL 后端，143.3s）。报告两份留档：
+灰玻璃版本 `plugins/PokeUtilsAutoTest/report-w-mysql-756of756.txt`，
+改成彻底留空后 `plugins/PokeUtilsAutoTest/report-w2-mysql-756of756.txt`
+（W1 读数为 `槽20=null` / `槽24=null`，其余读数两版一致）。
 
 ## 配置一览（第三轮新增键）
 
