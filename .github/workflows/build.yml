@@ -2,7 +2,7 @@
 #  PokeUtils-remake 构建 / 发版流水线
 #
 #  三种触发：
-#    · push 到 main / PR      -> 编译一次，产物作为 artifact 挂 30 天
+#    · push 到 main / PR      -> 编译一次，产物作为 artifact 挂 400 天（平台上限）
 #    · push tag v*            -> 编译，并把 jar 挂到对应的 GitHub Release（已存在则覆盖附件）
 #    · push 到 main 但版本号变了 -> 自动打 tag + 发版（版本号取自 plugin.yml）
 #    · workflow_dispatch      -> 手动跑一次
@@ -121,7 +121,10 @@ jobs:
           name: PokeUtils-remake-${{ steps.version.outputs.value }}
           path: out/*
           if-no-files-found: error
-          retention-days: 30
+          # artifact 没有「永久」选项：公有仓库上限 400 天、私有仓库 90 天，硬限制。
+          # 这里拉满到 400 天作为「尽量久」的兜底；真正长期留存的产物在 Release 附件里
+          # （Release 不带过期时间，只有手动删除才会消失）。
+          retention-days: 400
 
   publish:
     name: Publish release

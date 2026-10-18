@@ -154,7 +154,7 @@ Storage:
 
 | 触发 | 行为 |
 | --- | --- |
-| push 到 `main` / 提交 PR | 编译一次，jar 作为 artifact 保留 30 天 |
+| push 到 `main` / 提交 PR | 编译一次，jar 作为 artifact 保留 400 天（平台上限） |
 | push 一个 `v*` 标签 | 编译，并把 jar + `.sha256` 挂到同名 Release（已存在则覆盖附件） |
 | push 到 `main` 且 `plugin.yml` 的 `version` 变了 | 自动打 `v<版本>` 标签并发版 |
 | 手动 Run workflow | 只构建 |
