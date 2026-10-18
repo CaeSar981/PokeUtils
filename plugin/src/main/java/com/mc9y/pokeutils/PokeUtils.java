@@ -29,6 +29,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -177,6 +178,17 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
     private static final String DEFAULT_QUEST_REWARD_STICKER = "PT";
     private static final int DEFAULT_QUEST_REWARD_STICKER_AMOUNT = 2;
 
+    /**
+     * 奖励侧发券的默认值。
+     *
+     * <p>⚠️ 必须与出厂 {@code config.yml} 的 {@code Compound.reward-voucher} 段逐位一致
+     * （两个券名都是空串、数量 1）。双参 {@code getString}/`getInt` 只读本段、读不到就直接返回
+     * 这里的字面量，不会回退到 jar 内置配置 —— 两处不一致时，「换 jar 但沿用旧 config.yml」
+     * 的服会静默地多发或少发券。
+     */
+    private static final String DEFAULT_REWARD_VOUCHER = "";
+    private static final int DEFAULT_REWARD_VOUCHER_AMOUNT = 1;
+
     private static final boolean DEFAULT_DEX_ENABLED = true;
     private static final int[] DEFAULT_DEX_MILESTONES = {5, 10, 20};
     private static final int[] DEFAULT_DEX_MONEY = {50000, 200000, 500000};
@@ -191,6 +203,9 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
 
     /** 合成券定义缓存；同样在 {@code /pu reload} 时失效。 */
     private List<VoucherType> vouchers;
+
+    /** 已经告警过的「奖励里写错的券名」。用 Set 去重，避免每次领奖都刷日志。 */
+    private final Set<String> voucherWarned = new HashSet<String>();
 
     /** 粘剂合成配方缓存；{@code /pu reload} 时失效。 */
     private List<StickerRecipe> stickerRecipes;
@@ -988,6 +1003,83 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
             }
         }
         return null;
+    }
+
+    // ================================================================ 奖励侧的合成券来源（委托 / 图鉴）
+
+    /**
+     * 按名字（display / name / 材质名）找一张已配置的券。
+     *
+     * <p>奖励配置里填的是字符串而不是下标 —— 下标会在运营调换 {@code Compound.vouchers}
+     * 顺序后静默指到另一张券上，字符串至少会「找不到 → 不发 + 告警」。</p>
+     */
+    public VoucherType findVoucherByKey(String key) {
+        if (key == null || key.trim().isEmpty()) {
+            return null;
+        }
+        for (VoucherType voucher : this.getVouchers()) {
+            if (voucher.matchesKey(key)) {
+                return voucher;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 按名字发若干张合成券。
+     *
+     * <p>这是「券的游戏内来源」的唯一出口：委托领奖与图鉴里程碑都走这里。
+     * 券本身就是通胀中性的奖励（顶一次合成的金币，不增加货币总量），
+     * 所以它比直接发金币更适合当日常产出。</p>
+     *
+     * @return 实际发出去的数量；配置留空 / 券名没匹配上 / 数量非正时返回 0
+     */
+    public int grantVoucher(Player p, String key, int amount) {
+        if (p == null || amount <= 0) {
+            return 0;
+        }
+        if (key == null || key.trim().isEmpty()) {
+            return 0;
+        }
+        VoucherType voucher = this.findVoucherByKey(key);
+        if (voucher == null) {
+            // 只在第一次告警：奖励配置写错时每领一次奖都刷一条日志毫无意义。
+            if (this.voucherWarned.add(key.trim())) {
+                this.getLogger().warning("奖励配置里的合成券 \"" + key.trim()
+                        + "\" 没有在 Compound.vouchers 里定义，本次不发券。"
+                        + "（把 Compound.reward-voucher.* 改成 vouchers 里某张券的 display 即可）");
+            }
+            return 0;
+        }
+        try {
+            Map<Integer, ItemStack> leftover = p.getInventory().addItem(voucher.createItem(amount));
+            if (!leftover.isEmpty()) {
+                // 背包塞不下就掉在脚下：奖励不该因为背包满而蒸发（与退券的逻辑一致）。
+                for (ItemStack drop : leftover.values()) {
+                    p.getWorld().dropItemNaturally(p.getLocation(), drop);
+                }
+                p.sendMessage("§3精灵合成 §f|| §e背包已满, 合成券已掉落在你脚下。");
+            }
+            return amount;
+        } catch (Throwable t) {
+            this.getLogger().warning("发放合成券失败: " + t);
+            return 0;
+        }
+    }
+
+    /** 委托领奖时额外发的券（{@code Compound.reward-voucher.quest}）。留空 = 不发。 */
+    public String getQuestRewardVoucher() {
+        return this.getConfig().getString("Compound.reward-voucher.quest", DEFAULT_REWARD_VOUCHER);
+    }
+
+    /** 图鉴里程碑领奖时额外发的券（{@code Compound.reward-voucher.dex}）。留空 = 不发。 */
+    public String getDexRewardVoucher() {
+        return this.getConfig().getString("Compound.reward-voucher.dex", DEFAULT_REWARD_VOUCHER);
+    }
+
+    /** 上面两种奖励各发几张（{@code Compound.reward-voucher.amount}）。 */
+    public int getRewardVoucherAmount() {
+        return this.getConfig().getInt("Compound.reward-voucher.amount", DEFAULT_REWARD_VOUCHER_AMOUNT);
     }
 
     // ================================================================ 失败补偿（可配为送粘剂）
@@ -1925,6 +2017,13 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
                 ysd.deposit(stickerKey, stickerAmount);
             }
         }
+        // 新增：委托也发券（Compound.reward-voucher.quest，留空 = 不发）。
+        // 券是通胀中性奖励，比直接加金币更适合当日常产出 —— 它只顶掉下一次合成的金币消耗。
+        String voucherKey = this.getQuestRewardVoucher();
+        int voucherAmount = this.getRewardVoucherAmount();
+        VoucherType voucher = this.findVoucherByKey(voucherKey);
+        int voucherGiven = voucher == null ? 0 : this.grantVoucher(p, voucherKey, voucherAmount);
+
         StringBuilder msg = new StringBuilder("§3精灵合成 §f|| §a获得委托奖励: ");
         boolean any = false;
         if (money > 0) {
@@ -1933,6 +2032,11 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
         }
         if (sticker != null && stickerAmount > 0) {
             msg.append(any ? " §a+ " : "").append(stickerAmount).append(" 个").append(sticker.getDisplay());
+            any = true;
+        }
+        if (voucherGiven > 0) {
+            msg.append(any ? " §a+ " : "").append("§f").append(voucherGiven)
+                    .append(" 张").append(voucher.getDisplay());
         }
         p.sendMessage(msg.toString());
     }
@@ -2078,9 +2182,21 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
             if (reward.money > 0) {
                 msg.append("§f").append(reward.money).append(" §a金币");
             }
+            boolean any = reward.money > 0;
             if (sticker != null && reward.stickerAmount > 0) {
-                msg.append(reward.money > 0 ? " §a+ " : "")
+                msg.append(any ? " §a+ " : "")
                         .append(reward.stickerAmount).append(" 个").append(sticker.getDisplay());
+                any = true;
+            }
+            // 新增：图鉴里程碑也发券（Compound.reward-voucher.dex，留空 = 不发）。
+            // 里程碑是「长期收集」的节点，给券正好把玩家从图鉴推回合成台。
+            String voucherKey = this.getDexRewardVoucher();
+            int voucherAmount = this.getRewardVoucherAmount();
+            VoucherType voucher = this.findVoucherByKey(voucherKey);
+            int voucherGiven = voucher == null ? 0 : this.grantVoucher(p, voucherKey, voucherAmount);
+            if (voucherGiven > 0) {
+                msg.append(any ? " §a+ " : "").append("§f").append(voucherGiven)
+                        .append(" 张").append(voucher.getDisplay());
             }
             p.sendMessage(msg.toString());
             break;
@@ -2515,7 +2631,7 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
                 sender.sendMessage("§6/pu §fbal [玩家] - §e查询粘剂余额");
                 sender.sendMessage("§6/pu §fdebug <玩家> - §e查看某个玩家的合成状态与成功率构成");
                 sender.sendMessage("§6/pu §fstorage - §e查看存储后端状态（缓存 / 落盘 / 熔断）");
-                sender.sendMessage("§6/pu §fmigrate <sqlite|mysql> [dry-run] - §e把数据整体搬到另一个后端");
+                sender.sendMessage("§6/pu §fmigrate <sqlite|mysql|yaml> [dry-run] - §e把数据整体搬到另一个后端");
                 sender.sendMessage("§6/pu §fquestreset <玩家> - §e清空某玩家今天的委托进度");
                 sender.sendMessage("§6/pu §freload - §e重载插件配置文件");
             }
@@ -2657,13 +2773,13 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
             return new ArrayList<String>();
         }
 
-        // ---- /pu migrate <sqlite|mysql> [dry-run]
+        // ---- /pu migrate <sqlite|mysql|yaml> [dry-run]
         if ("migrate".equals(sub)) {
             if (!sender.hasPermission("pokeutils.admin")) {
                 return new ArrayList<String>();
             }
             if (args.length == 2) {
-                return completeFrom(Arrays.asList("mysql", "sqlite"), current);
+                return completeFrom(Arrays.asList("mysql", "sqlite", "yaml"), current);
             }
             if (args.length == 3) {
                 return completeFrom(Collections.singletonList("dry-run"), current);
@@ -3165,7 +3281,7 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
     }
 
     /**
-     * {@code /pu migrate <sqlite|mysql> [dry-run]} —— 把玩家数据整体搬到另一个后端。
+     * {@code /pu migrate <sqlite|mysql|yaml> [dry-run]} —— 把玩家数据整体搬到另一个后端。
      *
      * <p>典型场景：先用 SQLite 跑着，后来改上 MySQL（或反过来做一次冷备份）。
      * 命令<b>只读源端、只写目标端</b>，目标端用绝对值 upsert，所以中途失败后重跑一次
@@ -3175,12 +3291,12 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
      */
     private void handleMigrateCommand(final CommandSender sender, String[] args) {
         if (args.length < 2) {
-            sender.sendMessage("§b精灵信息 §f// §c用法: /pu migrate <sqlite|mysql> [dry-run]");
+            sender.sendMessage("§b精灵信息 §f// §c用法: /pu migrate <sqlite|mysql|yaml> [dry-run]");
             return;
         }
         String target = args[1].trim().toLowerCase();
-        if (!"sqlite".equals(target) && !"mysql".equals(target)) {
-            sender.sendMessage("§b精灵信息 §f// §c目标后端只能是 sqlite 或 mysql。");
+        if (!"sqlite".equals(target) && !"mysql".equals(target) && !"yaml".equals(target)) {
+            sender.sendMessage("§b精灵信息 §f// §c目标后端只能是 sqlite / mysql / yaml。");
             return;
         }
         final Storage source = this.storage;

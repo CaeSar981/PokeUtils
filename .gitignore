@@ -35,3 +35,7 @@ Thumbs.db
 # 所以这个脚本单独提交也不能在干净检出上跑 —— 属于纯本地产物。
 .tmp-compile/
 
+# ---- YamlStorage 的纯 JVM 冒烟（2026-10-19）----
+# 用 TestServer/libraries 拼 classpath 在本地跑，产物与临时数据目录都不入库。
+.tmp-yaml-smoke/
+

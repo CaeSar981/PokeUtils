@@ -34,7 +34,7 @@ public interface Storage {
     /** 连接是否可用。为 {@code false} 时上层会退化成「读到 0 / 写入丢弃」。 */
     boolean isOpen();
 
-    /** 后端类型标识，取值 {@code "sqlite"} / {@code "mysql"}，用于日志与测试断言。 */
+    /** 后端类型标识，取值 {@code "sqlite"} / {@code "mysql"} / {@code "yaml"}，用于日志与测试断言。 */
     String kind();
 
     /** 供启动日志打印的可读描述（SQLite 给文件路径，MySQL 给连接串与表名）。 */

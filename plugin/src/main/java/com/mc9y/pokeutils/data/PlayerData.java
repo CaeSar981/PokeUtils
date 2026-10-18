@@ -1388,6 +1388,12 @@ public class PlayerData {
         String rewardText = "§f" + money + " §e金币"
                 + (reward != null && plugin.getQuestRewardStickerAmount() > 0
                 ? " §a+ §f" + plugin.getQuestRewardStickerAmount() + " 个" + reward.getDisplay() : "");
+        // 新增：委托奖励里可能还有一张券（Compound.reward-voucher.quest）。界面上要写出来，
+        // 否则玩家看到背包多了一张券会以为是出 bug 了。
+        VoucherType rewardVoucher = plugin.findVoucherByKey(plugin.getQuestRewardVoucher());
+        if (rewardVoucher != null && plugin.getRewardVoucherAmount() > 0) {
+            rewardText += " §a+ §f" + plugin.getRewardVoucherAmount() + " 张" + rewardVoucher.getDisplay();
+        }
 
         if (quests.isEmpty()) {
             inv.setItem(13, button(Material.BARRIER, "§c今天没有委托",
@@ -1532,6 +1538,10 @@ public class PlayerData {
             boolean done = have >= reward.milestone;
             boolean taken = claimed.contains(reward.milestone);
             StickerType sticker = plugin.getStickerType(reward.sticker);
+            // 新增：里程碑奖励里可能还有一张券（Compound.reward-voucher.dex）。
+            VoucherType rewardVoucher = plugin.findVoucherByKey(plugin.getDexRewardVoucher());
+            String voucherText = rewardVoucher != null && plugin.getRewardVoucherAmount() > 0
+                    ? " §a+ §f" + plugin.getRewardVoucherAmount() + " 张" + rewardVoucher.getDisplay() : "";
             String state = taken ? "§7已领取" : (done ? "§a可领取" : "§c未达成");
             inv.setItem(rewardSlots[i], button(done && !taken ? Material.CHEST : Material.TRAPPED_CHEST,
                     "§e图鉴奖励 §f" + reward.milestone + " §8[" + state + "§8]",
@@ -1539,7 +1549,8 @@ public class PlayerData {
                     "§7 §k||§e 进度: §f" + have + " §7/ §f" + reward.milestone,
                     "§7 §k||§e 奖励: §f" + reward.money + " §e金币"
                             + (sticker != null && reward.stickerAmount > 0
-                            ? " §a+ §f" + reward.stickerAmount + " 个" + sticker.getDisplay() : ""),
+                            ? " §a+ §f" + reward.stickerAmount + " 个" + sticker.getDisplay() : "")
+                            + voucherText,
                     taken ? "§7 §k||§7 每个档位只能领取一次"
                             : (done ? "§7 §k||§a 点击领取" : "§7 §k||§7 继续收集即可解锁"),
                     "§d"));

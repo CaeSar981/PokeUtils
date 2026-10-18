@@ -1344,6 +1344,117 @@ private static void featureEntry(Inventory inv, int slot, boolean enabled, ItemS
 改成彻底留空后 `plugins/PokeUtilsAutoTest/report-w2-mysql-756of756.txt`
 （W1 读数为 `槽20=null` / `槽24=null`，其余读数两版一致）。
 
+### 37. 2026-10-18：给合成券一个游戏内来源（委托 / 图鉴里程碑）
+
+#### 37.1 问题
+
+合成券（`Compound.vouchers`）整套判定逻辑早就写好了：`findVoucherSlot` 从背包里挑一张
+匹配的券，`allowsStar` 限制适用星级，`refund.voucher-on-failure` 负责失败退券。
+但**券只能由管理员手动发放** —— 生产服上没人发，那条「有券就优先扣券、不扣金币」的分支
+永远不会触发。M 组与 P 组能测到它，是因为测试自己把券塞进了背包。
+
+#### 37.2 做法
+
+新增一段配置，让委托领奖与图鉴里程碑领奖**额外**发券：
+
+```yaml
+Compound:
+  reward-voucher:
+    quest: ""     # 委托领奖额外发的券
+    dex: ""       # 图鉴里程碑领奖额外发的券
+    amount: 1     # 每次发几张（两种奖励共用）
+```
+
+- 值填 `Compound.vouchers` 里某张券的 **display**（或 `name`、或材质名）。留空 = 不发。
+- 找券走 `PokeUtils#findVoucherByKey`，发券走 `PokeUtils#grantVoucher`：
+  - 找不到券名 → 控制台**只告警一次**（用 `Set` 去重），不发券，领奖照常完成；
+  - 背包满 → 掉在玩家脚下并提示，不吞奖励（与 `refundVoucher` 同一条原则）；
+  - 券物品由 `VoucherType#createItem` 统一构造，**与 `matches` 的判定条件严格对称**
+    —— 否则会出现「发了一张自己花不掉的券」。
+- 界面同步：委托面板的「奖励」行、图鉴里程碑的奖励行都会写出券，避免玩家看到背包多东西以为出 bug。
+
+#### 37.3 为什么选委托 + 图鉴，而不是直接卖券或活动送
+
+券是**通胀中性**的奖励：它顶掉一次合成的金币消耗，不增加货币总量。所以它适合当日常产出，
+而「日常产出」在这套系统里只有两个口子 —— 委托（每天 3 条）与图鉴里程碑（长期收集）。
+把它们接上，等于让「今天的日常」和「合出来的产物」之间多一条回路：领奖 → 有券 → 回去合成。
+
+#### 37.4 为什么按名字找券而不是按下标
+
+下标在运营调换 `Compound.vouchers` 顺序后会静默指到另一张券上；字符串至少会
+「找不到 → 不发 + 告警」。同材质配了多张券时必须写 `display`，否则会命中第一张。
+
+#### 37.5 测试
+
+新增 `X 组`（21 条断言，10 步）：
+
+- **X0**：券定义读到 1 种；三条奖励配置读回来的值与写进去的一致；背包里一开始没有券；
+- **X1~X5**：委托领奖 → 提示里写了「1 张券」、背包 +1 张、且**发出去的券显示名与配置一致**
+  （这条是 `createItem` 与 `matches` 对称性的回归项）；
+- **X6~X8**：把 `reward-voucher.quest` 改回空串 → 面板奖励行不再出现券、领奖照常、券数量不变。
+  这一条守的是**出厂默认值**：两个券名默认都是空串，老服升级 jar 后必须维持原样；
+- **X9~X11**：图鉴里程碑同样发券，且里程碑正常落库。
+
+端到端基线 **756 → 767**（实测 767/767 全绿，MySQL 后端）。
+
+### 38. 2026-10-19：YAML 文件后端（`data/YamlStorage.java`）
+
+**动机**：SQLite 与 MySQL 都得靠外部工具才能看数据 —— 前者要 DB 浏览器，后者要账号和一句
+`SELECT`。但有一类场景里「看得见」比性能更值钱：小服、单机调试、出事后要把某个人的粘剂
+手工改回来、想用 git 或网盘给数据做版本管理。`Storage.type: yaml` 把每个玩家摊成一个
+文本文件，记事本就能看、能改、能 diff。
+
+**布局**（`Storage.yaml.dir`，默认 `yaml`）：
+
+```
+plugins/PokeUtils-remake/yaml/players/<uuid>.yml
+```
+
+```yaml
+name: Steve
+fail-streak: 2
+fail-star: 5
+stickers:
+  PT: 12
+  JL: 3
+quests:
+  d2026-10-19:
+    '0': {type: SUCCESS, target: 3, star: 0, progress: 1, claimed: false}
+dex:
+  Pikachu: 3
+dex-claimed: [10, 20]
+```
+
+**四个实现决策**
+
+| 决策 | 理由 |
+| --- | --- |
+| 每玩家一个文件 | `YamlConfiguration.save()` 只能整份重写。所有玩家挤在一个文件里时，任何一个人合成一次都要重写全服那几 MB |
+| 写临时文件 + 原子改名 | 直接 `save(目标)` 会在序列化到一半时截断原文件；`taskkill /F` 撞上那一刻就只剩半份**语法都不完整**的 YAML |
+| 日期键加 `d` 前缀 | SnakeYAML 会把裸写的 `2026-10-19` 隐式解析成 `java.util.Date`，`getKeys()` 拿回来的是 `Mon Oct 19 00:00:00 CST 2026`，委托从此再也读不出来 |
+| 坏文件改名留证，而不是当空数据 | 当成空数据处理的话，下一次写入就把原文件覆盖成空壳 —— 等于「因为文件坏了所以把它删了」。这里改成 `.yml.corrupt-<时间戳>` 并打 SEVERE |
+
+**刻意不解决的三件事**（同时也写进了类注释与 `config.yml` 注释）
+
+1. **只支持单实例**：没有文件锁、没有版本号，两个服务端写同一份目录必然互相覆盖。
+   跨服共享只能用 MySQL。
+2. **写入成本随脏字段数增长**：`CachedStorage.flushEntry` 一次回写会连着调
+   `setSticker`（每种脏粘剂一次）、`setFailStreak`、`setFailStar`，而这里每个调用各重写
+   一次文件。小服的几 KB 写入在毫秒以下，上量应该换 SQLite —— 它一次事务就能合并提交。
+3. **没有索引**：`findUuidByName` 靠启动时扫出来的内存表；在外部手工新增文件之后，
+   要等 1 秒限频的重扫才会被认到。
+
+**接口面一行没改**：`YamlStorage` 只是 `Storage` 的第三个实现，`CachedStorage` /
+`StorageMigrator` / 业务代码全部不动。`/pu migrate` 的目标端也支持 `yaml`
+（用法文本与 Tab 补全同步改了），所以「先用 YAML 跑起来、人多了搬去 SQLite」是一条
+完整路径 —— 迁移本身就是幂等的绝对值 upsert，中途失败重跑一次即对齐。
+
+**验证**：新增 **Z 组 49 条断言**（`buildZ`），在临时目录里另起一个 `YamlStorage` 实例
+跑完整契约：空库零值、粘剂的绝对值覆盖、委托的 `INSERT OR IGNORE` 幂等、写不存在的
+槽位不新增、图鉴累加与领奖判重、`listPlayers` / `listStickers` / 按名反查、
+**关掉再打开还读得到**（这一条才是「真的落盘了」的证据），以及目录里没有残留的 `.tmp`。
+Z 组不碰主后端，因此在任何一种 `Storage.type` 下都能跑。
+
 ## 配置一览（第三轮新增键）
 
 | 键 | 默认 | 说明 |
@@ -1410,6 +1521,14 @@ private static void featureEntry(Inventory inv, int slot, boolean enabled, ItemS
 | `Compound.dex.enabled` | `true` | 合成图鉴开关 |
 | `Compound.dex.rewards.<种类数>` | `5` / `10` / `20` 三档 | 每档 = `money` / `sticker-type` / `sticker-amount`；每档只能领一次 |
 
+## 配置一览（第十五轮新增键）
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `Compound.reward-voucher.quest` | `""` | 委托领奖时额外发的券；填 `Compound.vouchers` 里某张券的 `display` / `name` / 材质名。**留空 = 不发** |
+| `Compound.reward-voucher.dex` | `""` | 图鉴里程碑领奖时额外发的券；填法同上，留空 = 不发 |
+| `Compound.reward-voucher.amount` | `1` | 上面两种奖励各发几张 |
+
 ## 配置一览（第七轮新增键）
 
 | 键 | 默认 | 说明 |
@@ -1421,9 +1540,10 @@ private static void featureEntry(Inventory inv, int slot, boolean enabled, ItemS
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `Storage.type` | `sqlite` | `sqlite` / `mysql` |
+| `Storage.type` | `sqlite` | `sqlite` / `mysql` / `yaml` |
 | `Storage.sqlite.file` | `pokeutils.db` | 数据库文件（相对路径基于插件数据目录，也可写绝对路径） |
 | `Storage.sqlite.checkpoint-minutes` | `10` | 把 WAL 合并回主库并截断的间隔（`0` = 不开启） |
+| `Storage.yaml.dir` | `yaml` | YAML 后端的数据根目录，实际文件在 `<dir>/players/<uuid>.yml`（见第 38 条） |
 | `Storage.mysql.host` / `port` / `database` / `user` / `password` | `127.0.0.1` / `3306` / `pokeutils` / `root` / 空 | 连接参数 |
 | `Storage.mysql.table-prefix` | `pu_` | 表名前缀，用来和同库其它插件隔开 |
 | `Storage.mysql.use-ssl` / `server-timezone` | `false` / 空 | MySQL 8 的 cj 驱动通常要填时区（如 `Asia/Shanghai`） |
@@ -1563,15 +1683,19 @@ Blank038API.getPokemonAPI()Lcom/mc9y/pokemonapi/PokemonAPI;   [static]
     **整段缺失时全部回落到与原实现逐位一致的默认值**；
     ⚠️ 但「新增段缺失」时用的是**代码里写的字面量默认值**，不是 jar 内置 `config.yml` ——
     所以两者必须一致，详见修复记录第 19 条
-  - `Storage` —— 存储后端：`type`（`sqlite` / `mysql`）、
+  - `Storage` —— 存储后端：`type`（`sqlite` / `mysql` / `yaml`）、
     `sqlite.file` 与 `sqlite.checkpoint-minutes`（WAL 定期合并，0 = 关）、
+    `yaml.dir`（每玩家一个文本文件，见第 38 条）、
     `mysql.*`（host / port / database / user / password / table-prefix / use-ssl /
     server-timezone / pool-size / connect-timeout-ms / borrow-timeout-ms）、
     `async`（`write-behind` = `auto` / `always` / `never`、`flush-timeout-ms`、
     `worker-threads`）。**改 `type` 需要重启服务端**（`/pu reload` 不会重连数据库），
-    且 SQLite 与 MySQL 里是两份互相独立的数据。详见修复记录第 20~27 条
+    且不同后端里是几份互相独立的数据。详见修复记录第 20~27 条
 - `plugins/PokeUtils-remake/pokeutils.db`：SQLite 数据库（`pu_player` / `pu_sticker` 两张表）。
-  用 MySQL 后端时这个文件不参与读写（但会保留在原地，切回 SQLite 时数据还在）
+  用 MySQL / YAML 后端时这个文件不参与读写（但会保留在原地，切回 SQLite 时数据还在）
+- `plugins/PokeUtils-remake/yaml/players/<uuid>.yml`：YAML 后端的数据文件，一个玩家一个文件。
+  可以直接用记事本打开、直接改（改完让玩家重进一次服即生效）。
+  切到别的后端时这些文件同样保留在原地，不会自动删除
 - `plugins/PokeUtils-remake/Data/<玩家名>.yml`：**仅存在于升级前的旧版本**；
   玩家进服时被导入数据库并归档到 `plugins/PokeUtils-remake/Data-migrated/`（归档而非删除）
 - `plugins/PokeUtils-remake/logs/compound-<日期>.log`：合成流水日志

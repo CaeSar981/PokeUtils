@@ -24,6 +24,14 @@ public final class StorageFactory {
     // ---- 出厂默认值：与 plugin/src/main/resources/config.yml 的 Storage 段逐字对应 ----
     static final String DEFAULT_TYPE = "sqlite";
     static final String DEFAULT_SQLITE_FILE = "pokeutils.db";
+    /**
+     * YAML 后端的数据根目录（相对插件数据目录）。
+     *
+     * <p>刻意不叫 {@code Data} —— {@code Data/} 是<b>旧版</b>（每玩家一个 YAML）的目录，
+     * 而 {@link LegacyDataMigration} 会把 {@code Data/<玩家名>.yml} 当作待迁移的旧数据。
+     * 两者同名的话，新后端刚写出来的文件会在下次进服时被当成旧数据再搬一遍。</p>
+     */
+    static final String DEFAULT_YAML_DIR = "yaml";
     static final String DEFAULT_MYSQL_HOST = "127.0.0.1";
     static final int DEFAULT_MYSQL_PORT = 3306;
     static final String DEFAULT_MYSQL_DATABASE = "pokeutils";
@@ -95,8 +103,21 @@ public final class StorageFactory {
                         + "本地 SQLite 里的数据与 MySQL 里的是两份不同的数据，请确认这是预期行为。";
                 logger.severe(fallback);
             }
+        } else if ("yaml".equals(type)) {
+            // YAML 是「显式选择」的后端，打不开就直接失败，不像 MySQL 那样回退到别的后端：
+            // 回退会让运维以为数据在 yaml/ 里，实际写进了 pokeutils.db，之后两边都找不到人。
+            try {
+                backend = StorageFactory.newYaml(plugin, dataFolder, logger);
+                logger.info("YAML 存储已就绪: " + backend.describe());
+            } catch (Exception ex) {
+                String reason = "YAML 存储打开失败（" + StorageFactory.rootCause(ex)
+                        + "），本次不启用任何存储后端。请检查插件目录的写入权限。";
+                logger.severe(reason);
+                return new Opened(null, reason);
+            }
         } else if (!"sqlite".equals(type)) {
-            logger.warning("Storage.type 的值 \"" + type + "\" 无法识别（可选 sqlite / mysql），按 sqlite 处理。");
+            logger.warning("Storage.type 的值 \"" + type
+                    + "\" 无法识别（可选 sqlite / mysql / yaml），按 sqlite 处理。");
         }
 
         if (backend == null) {
@@ -130,9 +151,13 @@ public final class StorageFactory {
      */
     public static Storage openBackend(Plugin plugin, File dataFolder, Logger logger, String kind)
             throws Exception {
-        return "mysql".equals(kind)
-                ? StorageFactory.newMysql(plugin, logger)
-                : StorageFactory.newSqlite(plugin, dataFolder, logger);
+        if ("mysql".equals(kind)) {
+            return StorageFactory.newMysql(plugin, logger);
+        }
+        if ("yaml".equals(kind)) {
+            return StorageFactory.newYaml(plugin, dataFolder, logger);
+        }
+        return StorageFactory.newSqlite(plugin, dataFolder, logger);
     }
 
     /** 构造并打开一个 MySQL 后端（未包装缓存）。 */
@@ -160,6 +185,19 @@ public final class StorageFactory {
                 plugin.getConfig().getString("Storage.sqlite.file", DEFAULT_SQLITE_FILE)), logger);
         sqlite.open();
         return sqlite;
+    }
+
+    /** 构造并打开一个 YAML 后端（未包装缓存）。 */
+    private static YamlStorage newYaml(Plugin plugin, File dataFolder, Logger logger) throws Exception {
+        String raw = plugin.getConfig().getString("Storage.yaml.dir", DEFAULT_YAML_DIR);
+        String path = raw == null || raw.trim().isEmpty() ? DEFAULT_YAML_DIR : raw.trim();
+        File dir = new File(path);
+        if (!dir.isAbsolute()) {
+            dir = new File(dataFolder, path);
+        }
+        YamlStorage yaml = new YamlStorage(dir, logger);
+        yaml.open();
+        return yaml;
     }
 
     /** 后台计算线程数（供 {@link Async#init}）。 */
