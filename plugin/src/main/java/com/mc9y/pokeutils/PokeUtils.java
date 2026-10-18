@@ -36,6 +36,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import net.milkbowl.vault.economy.Economy;
 import net.minecraft.server.v1_12_R1.NBTTagCompound;
 import net.minecraft.server.v1_12_R1.NBTTagString;
@@ -196,6 +197,16 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
 
     /** 每日委托类型定义缓存；{@code /pu reload} 时失效。 */
     private List<QuestType> questTypes;
+
+    /**
+     * 已排队 / 正在执行的「委托进度推进」任务数。
+     *
+     * <p>存在的唯一目的，是让<b>主线程上的面板读</b>知道「要不要先等一等」：
+     * 进度推进已经挪到写队列（{@link #addQuestProgress}），如果主线程紧接着读面板，
+     * 读到的可能是还没落库的旧进度 —— 典型场景就是「合成成功后立刻点领取」。
+     * 计数器为 0 时连一次屏障都不必提交，正常路径零开销。</p>
+     */
+    private final AtomicInteger pendingQuestWrites = new AtomicInteger();
 
     /** 「本服务端没有 sendActionBar」的告警只打一次，避免刷屏。 */
     private boolean actionBarWarned;
@@ -1651,29 +1662,65 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
     }
 
     /**
-     * 取某个玩家今天的委托面板。
+     * 取某个玩家今天的委托面板（<b>主线程一致读</b>）。
      *
      * <p>库里还没有今天的记录时才生成并落库 —— 委托是「当天固定」的，
      * 生成算法只依赖 (UUID, 日期) 所以结果稳定，落库只是为了让进度有地方存。</p>
      *
-     * <p>顺序刻意是「先查库、再生成」：这个方法的主要调用方是 {@link #addQuestProgress}，
-     * 也就是<b>每次合成都走一遍</b>。原实现不管库里有没有都先跑一次加权随机生成一整组委托，
+     * <p>顺序刻意是「先查库、再生成」：原实现不管库里有没有都先跑一次加权随机生成一整组委托，
      * 再在「库里已有」时把刚算出来的那组丢掉 —— 白算一次随机，纯浪费。</p>
+     *
+     * <p>⚠️ <b>会先等委托写入队列排空</b>（只在真的有排队写入时才提交屏障）。进度推进
+     * 已经挪到后台（见 {@link #addQuestProgress}），少了这道屏障，「合成成功后立刻点开
+     * 面板」会读到推进前的进度。界面侧的读走的是同一个队列，顺序天然对得上。</p>
      */
     public List<QuestData> getQuestBoard(Player p) {
-        String day = this.today();
-        if (this.storage == null) {
-            return QuestData.generate(p.getUniqueId(), day,
-                    this.getQuestTypes(), this.getQuestDailyAmount());
+        // 主线程读面板 = 「一致读」：先等已经排队的委托写入落地。
+        // 不加这一句的话，合成成功（进度已异步落库）后玩家立刻点开面板 / 点领取，
+        // 看到的是推进前的进度，领奖还会被判成「还没完成」。
+        // 计数器为 0 时连屏障都不提交 —— 正常路径零开销。
+        if (this.pendingQuestWrites.get() > 0) {
+            Async.drain(500L);
         }
-        List<QuestData> stored = this.storage.getQuests(p.getUniqueId(), day);
+        return this.getQuestBoard(p.getUniqueId(), p.getName());
+    }
+
+    /**
+     * 取委托面板（只依赖 UUID / 名字，不看 {@link Player} 实例）。
+     *
+     * <p>⚠️ <b>只允许在主线程调用</b>：内部会惰性加载 {@link #getQuestTypes()}，
+     * 那条路径要读 {@code config.yml}。后台线程请用下面带 {@code types / daily} 的重载。</p>
+     */
+    public List<QuestData> getQuestBoard(UUID uuid, String name) {
+        return this.loadQuestBoard(uuid, name, this.today(),
+                this.getQuestTypes(), this.getQuestDailyAmount(), this.storage);
+    }
+
+    /**
+     * 取委托面板的<b>可后台调用</b>版本（面板异步加载用）。
+     *
+     * <p>日期与委托类型配置必须由主线程先取好再传进来 —— {@code FileConfiguration}
+     * 不是线程安全的，{@code getQuestTypes()} 还是「惰性加载 + 缓存」，
+     * 两个线程同时首次触发会各建一份。除此之外这里只碰存储层：SQLite 的每个公开方法
+     * 都是 {@code synchronized}，MySQL 从连接池借连接，都允许后台线程进。</p>
+     */
+    public List<QuestData> getQuestBoard(UUID uuid, String name, String day,
+                                         List<QuestType> types, int daily) {
+        return this.loadQuestBoard(uuid, name, day, types, daily, this.storage);
+    }
+
+    private List<QuestData> loadQuestBoard(UUID uuid, String name, String day,
+                                           List<QuestType> types, int daily, Storage store) {
+        if (store == null) {
+            return QuestData.generate(uuid, day, types, daily);
+        }
+        List<QuestData> stored = store.getQuests(uuid, day);
         if (!stored.isEmpty()) {
             return stored;
         }
-        List<QuestData> generated = QuestData.generate(p.getUniqueId(), day,
-                this.getQuestTypes(), this.getQuestDailyAmount());
-        this.storage.insertQuests(p.getUniqueId(), p.getName(), day, generated);
-        stored = this.storage.getQuests(p.getUniqueId(), day);
+        List<QuestData> generated = QuestData.generate(uuid, day, types, daily);
+        store.insertQuests(uuid, name, day, generated);
+        stored = store.getQuests(uuid, day);
         // 落库失败（或者这一瞬间数据库有问题）时也别让界面空着
         return stored.isEmpty() ? generated : stored;
     }
@@ -1698,30 +1745,66 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
      *
      * <p>顺序上仍然是「先读后写」，语义与单类版本逐字一致：跳过已领取 / 已完成的，
      * 进度封顶到 target，没有实际变化的槽位不写。</p>
+     *
+     * <p><b>整段跑在后台写队列上</b>（不在调用线程）：一次成功合成会走到这里，
+     * 而它原来要占着主线程做一次「读面板 + 批量写」。方法返回时进度<b>不一定</b>已落盘 ——
+     * 需要立刻读回的地方用 {@link #getQuestBoard(Player)}，它会先等这批写入排空。</p>
      */
-    public void addQuestProgress(Player p, String[] types, int delta) {
+    public void addQuestProgress(final Player p, final String[] types, final int delta) {
         if (!this.isQuestEnabled() || delta <= 0 || types == null || types.length == 0) {
             return;
         }
-        String day = this.today();
-        List<QuestData> board = this.getQuestBoard(p);
-        Map<Integer, Integer> updates = new LinkedHashMap<Integer, Integer>();
-        for (QuestData quest : board) {
-            if (quest.isClaimed() || quest.isComplete() || !containsType(types, quest.getType())) {
-                continue;
-            }
-            int next = Math.min(quest.getProgress() + delta, quest.getTarget());
-            if (next == quest.getProgress()) {
-                continue;
-            }
-            // 就地更新内存对象：界面正开着时下次重绘读的就是这份 board。
-            quest.setProgress(next);
-            updates.put(quest.getSlot(), next);
-        }
-        if (updates.isEmpty() || this.storage == null) {
+        final Storage store = this.storage;
+        if (store == null) {
             return;
         }
-        this.storage.setQuestProgressBatch(p.getUniqueId(), day, updates);
+        // 这几个值必须在主线程先取好：getQuestTypes() 是「惰性加载 + 读 config.yml」，
+        // getQuestDailyAmount() 同样读配置。绑好之后后台线程只碰存储层。
+        final UUID uuid = p.getUniqueId();
+        final String name = p.getName();
+        final String day = this.today();
+        final List<QuestType> enabled = this.getQuestTypes();
+        final int daily = this.getQuestDailyAmount();
+
+        // 整段「读面板 → 算新进度 → 批量写回」都丢给**单线程写队列**：
+        //   · 主线程不再为一次成功合成等一次数据库往返（远程 MySQL 是 20~40ms，
+        //     而合成是玩家连点的操作，这一段就是「点了没反应」的来源）；
+        //   · 读改写仍然是串行的 —— 同一个玩家连着两次成功合成不会互相覆盖，
+        //     这是把读改写挪进线程池最容易丢的性质，单线程池正好保住了。
+        //
+        // 代价：这批进度不再保证「方法返回时已落盘」。进度是单调计数，丢了不会多发奖励，
+        // 关服有 drain + flushAll 兜底；需要立刻读回的场景由 getQuestBoard(Player) 的
+        // 屏障 + pendingQuestWrites 覆盖。
+        this.pendingQuestWrites.incrementAndGet();
+        Async.write(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    List<QuestData> board = PokeUtils.this.loadQuestBoard(
+                            uuid, name, day, enabled, daily, store);
+                    Map<Integer, Integer> updates = new LinkedHashMap<Integer, Integer>();
+                    for (QuestData quest : board) {
+                        if (quest.isClaimed() || quest.isComplete()
+                                || !containsType(types, quest.getType())) {
+                            continue;
+                        }
+                        int next = Math.min(quest.getProgress() + delta, quest.getTarget());
+                        if (next == quest.getProgress()) {
+                            continue;
+                        }
+                        updates.put(quest.getSlot(), next);
+                    }
+                    if (!updates.isEmpty()) {
+                        store.setQuestProgressBatch(uuid, day, updates);
+                    }
+                } catch (Throwable t) {
+                    // 进度推进失败不该让「合成成功」这件事变成异常：只留痕。
+                    PokeUtils.this.getLogger().warning("推进委托进度失败（" + name + "）: " + t);
+                } finally {
+                    PokeUtils.this.pendingQuestWrites.decrementAndGet();
+                }
+            }
+        });
     }
 
     private static boolean containsType(String[] types, String type) {
@@ -1935,14 +2018,24 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
 
     /** 图鉴内容快照（种族 -> 产出次数）。 */
     public Map<String, Integer> getDexAll(Player p) {
+        return this.getDexAll(p.getUniqueId());
+    }
+
+    /** 图鉴内容快照；只碰存储层，允许后台线程调用（面板异步加载用）。 */
+    public Map<String, Integer> getDexAll(UUID uuid) {
         return this.storage == null
-                ? new LinkedHashMap<String, Integer>() : this.storage.dexAll(p.getUniqueId());
+                ? new LinkedHashMap<String, Integer>() : this.storage.dexAll(uuid);
     }
 
     /** 已领取的图鉴里程碑。 */
     public Set<Integer> getDexClaimed(Player p) {
+        return this.getDexClaimed(p.getUniqueId());
+    }
+
+    /** 已领取的图鉴里程碑；只碰存储层，允许后台线程调用。 */
+    public Set<Integer> getDexClaimed(UUID uuid) {
         return this.storage == null
-                ? new java.util.HashSet<Integer>() : this.storage.dexClaimed(p.getUniqueId());
+                ? new java.util.HashSet<Integer>() : this.storage.dexClaimed(uuid);
     }
 
     /**

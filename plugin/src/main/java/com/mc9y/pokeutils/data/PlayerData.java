@@ -11,6 +11,8 @@ import com.pixelmonmod.pixelmon.storage.PlayerPartyStorage;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
@@ -72,6 +74,16 @@ public class PlayerData {
      * 下一 tick 自动解除（所以不会影响正常玩家的连续操作）。</p>
      */
     private boolean processing;
+
+    /**
+     * 本会话最近一次「异步打开面板」的请求号。
+     *
+     * <p>委托 / 图鉴面板的数据要读库，现在跑在后台线程上，界面晚一两个 tick 才建出来。
+     * 这段时间里玩家可能又点了别的入口 —— 那就必须丢弃晚到的旧结果，否则会出现
+     * 「先点图鉴、后点委托，最后屏幕上弹出图鉴」这种错序。每次请求自增一次，
+     * 回调里比一下号就知道自己是不是过期了。</p>
+     */
+    private int guiSeq;
 
     // ================================================================ 第四轮新增：子界面状态
     //
@@ -1272,9 +1284,76 @@ public class PlayerData {
         p.openInventory(inv);
     }
 
-    /** 打开每日委托界面。 */
-    public void openQuestGui(Player p) {
+    /**
+     * 这次异步取数的结果还该不该用。
+     *
+     * <p>三种情况都要作废：</p>
+     * <ul>
+     *   <li>玩家在这几毫秒里退服了 —— 再碰 Bukkit API 就是在操作已下线的实体；</li>
+     *   <li>期间又点开了别的面板 —— 请求号已经往上走，晚到的旧结果会把新界面盖掉；</li>
+     *   <li>会话被重建了 —— {@code /pu compound} 与重开主界面都会换一个 {@link PlayerData}
+     *       实例，旧实例的回调若照常执行，会盖掉玩家刚打开的新界面。</li>
+     * </ul>
+     */
+    private boolean stillCurrent(Player p, int seq) {
+        return p.isOnline() && seq == this.guiSeq
+                && PokeUtils.getInstance().playerdatas.get(p.getName()) == this;
+    }
+
+    /**
+     * 打开每日委托界面（<b>异步读库</b>）。
+     *
+     * <p>面板数据要查库，而这次查询以前跑在玩家点击的那个 tick 上 —— 远程 MySQL 下
+     * 就是 20~40ms 的停顿，玩家感受到的是「点了一下，界面过一会儿才出来」。现在拆成两段：
+     * 后台线程读面板，回到主线程建界面并打开（{@code openInventory} 必须走主线程，
+     * 它要改玩家窗口状态并派发事件）。</p>
+     *
+     * <p>读走的是<b>写队列</b>而不是算池：委托进度的写入也在同一个单线程队列上，
+     * FIFO 保证「这次读」排在「刚刚合成推进的那次写」之后 —— 合成完立刻点开面板，
+     * 看到的是新进度，而不是回退一格。</p>
+     */
+    public void openQuestGui(final Player p) {
         this.select = true;
+        final PokeUtils plugin = PokeUtils.getInstance();
+        final int seq = ++this.guiSeq;
+        final UUID uuid = p.getUniqueId();
+        final String name = p.getName();
+        // 日期与委托类型配置在主线程先取好：它们要读 config.yml，而后台线程不能碰。
+        final String day = plugin.today();
+        final List<QuestType> types = plugin.getQuestTypes();
+        final int daily = plugin.getQuestDailyAmount();
+
+        Async.write(new Runnable() {
+            @Override
+            public void run() {
+                final List<QuestData> loaded;
+                try {
+                    loaded = plugin.getQuestBoard(uuid, name, day, types, daily);
+                } catch (Throwable t) {
+                    plugin.getLogger().warning("读取委托面板失败（" + name + "）: " + t);
+                    return;
+                }
+                Async.main(new Runnable() {
+                    @Override
+                    public void run() {
+                        // 关服途中 Async.main 会退化成「在调用线程直接跑」，
+                        // 这时连 p.isOnline() 都不该碰，先看插件还在不在。
+                        if (!plugin.isEnabled()) {
+                            return;
+                        }
+                        // 玩家在这几毫秒里退服 / 又点了别的入口 / 会话被重建 → 这次结果作废。
+                        if (!PlayerData.this.stillCurrent(p, seq)) {
+                            return;
+                        }
+                        PlayerData.this.renderQuestGui(p, loaded);
+                    }
+                });
+            }
+        });
+    }
+
+    /** 委托界面的主线程构建部分（数据已经取好）。 */
+    private void renderQuestGui(Player p, List<QuestData> quests) {
         PokeUtils plugin = PokeUtils.getInstance();
         Inventory inv = Bukkit.createInventory(null, 27, TITLE_QUEST);
         ItemStack pane = greyPane();
@@ -1282,7 +1361,6 @@ public class PlayerData {
             inv.setItem(i, pane);
         }
 
-        List<QuestData> quests = plugin.getQuestBoard(p);
         int money = plugin.getQuestRewardMoney();
         StickerType reward = plugin.getStickerType(plugin.getQuestRewardSticker());
         String rewardText = "§f" + money + " §e金币"
@@ -1358,10 +1436,43 @@ public class PlayerData {
      * <p>分两区：上方 45 格是收录到的精灵列表（分页），下方右侧是里程碑奖励按钮
      * （最多 6 个，超出的会在关闭按钮的说明里提示）。</p>
      */
-    public void openDexGui(Player p, int page) {
+    public void openDexGui(final Player p, final int page) {
         this.select = true;
+        final PokeUtils plugin = PokeUtils.getInstance();
+        final int seq = ++this.guiSeq;
+        final UUID uuid = p.getUniqueId();
+        final String name = p.getName();
+        // 图鉴是「玩家自己的产出记录」，与委托进度没有先后关系，所以走多线程算池：
+        // 一个收录了 300 种的玩家要拉 300 行，压在点击那一帧会明显顿一下。
+        Async.compute(new Runnable() {
+            @Override
+            public void run() {
+                final Map<String, Integer> all;
+                final Set<Integer> claimed;
+                try {
+                    all = plugin.getDexAll(uuid);
+                    claimed = plugin.getDexClaimed(uuid);
+                } catch (Throwable t) {
+                    plugin.getLogger().warning("读取图鉴失败（" + name + "）: " + t);
+                    return;
+                }
+                Async.main(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (!PlayerData.this.stillCurrent(p, seq)) {
+                            return;
+                        }
+                        PlayerData.this.renderDexGui(p, all, claimed, page);
+                    }
+                });
+            }
+        });
+    }
+
+    /** 图鉴界面的主线程构建部分（数据已经取好）。 */
+    private void renderDexGui(Player p, Map<String, Integer> all,
+                              Set<Integer> claimed, int page) {
         PokeUtils plugin = PokeUtils.getInstance();
-        Map<String, Integer> all = plugin.getDexAll(p);
         List<String> species = new ArrayList<String>(all.keySet());
         int pageSize = 45;
         int pages = Math.max((species.size() + pageSize - 1) / pageSize, 1);
@@ -1390,8 +1501,7 @@ public class PlayerData {
                 "§d"));
         inv.setItem(53, button(Material.ARROW, "§e下一页 §7(" + current + " / " + pages + ")"));
 
-        // 里程碑奖励按钮：固定 6 个位置
-        java.util.Set<Integer> claimed = plugin.getDexClaimed(p);
+        // 里程碑奖励按钮：固定 6 个位置（已领取的档位由后台线程一起查好传进来）
         int[] rewardSlots = {46, 47, 48, 50, 51, 52};
         List<PokeUtils.DexReward> rewards = plugin.getDexRewards();
         int have = species.size();
