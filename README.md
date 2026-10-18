@@ -107,16 +107,13 @@ Storage:
 `/pu` 全链路支持 Tab 补全，候选按权限与开关过滤；玩家名只补在线的（离线名单要查库 / 请求 Mojang，
 不能放在高频路径上）。
 
-权限节点已写进 `plugin.yml`（原插件一个都没声明）：
+权限节点已在 `plugin.yml` 中声明：
 
 | 节点 | 默认 | 用途 |
 | --- | --- | --- |
 | `pokeutils.use` | `true` | 见 `Compound.use-permission` |
 | `pokeutils.admin` | `op` | 管理指令 |
 | `vip.yx` / `vip.cs` | `false` | 七星失败保留一只 |
-
-> 原 `plugin.yml` 声明过 `PokeStatsAPI` 与 `PokeQuest`，本版本已移除（前者是挂名依赖，字节码零引用；
-> 详见 [`docs/开发说明.md`](docs/开发说明.md)）。
 
 ## 构建
 
@@ -170,9 +167,5 @@ Storage:
 | --- | --- |
 | [`docs/配置参考.md`](docs/配置参考.md) | 全部配置键按轮次汇总的默认值与说明、数据文件布局 |
 | [`docs/修复记录.md`](docs/修复记录.md) | 逐条修复记录：每个坑的现象、根因与改法。排查线上问题先从这份开始 |
-| [`docs/开发说明.md`](docs/开发说明.md) | 目录结构与类的职责、与原版的字节码级还原度比对、编译桩原理、接口核对 |
+| [`docs/开发说明.md`](docs/开发说明.md) | 目录结构与类的职责、编译桩原理、与依赖插件的接口核对 |
 | [`config.yml`](plugin/src/main/resources/config.yml) | 全部配置键的默认值与原位注释（最权威） |
-
-## 说明
-
-本项目为对既有 jar 的逆向复原，并在其基础上继续维护与增强，仅用于学习、维护与二次开发。
