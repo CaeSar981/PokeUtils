@@ -66,6 +66,17 @@ public class SqliteStorage implements Storage {
             + "  updated_at  INTEGER NOT NULL DEFAULT 0)";
 
     /**
+     * 按名字查玩家的索引。
+     *
+     * <p>{@code /pu g|take} 要给离线玩家发货，解析 UUID 的一环是「按名字在库里找」
+     * （{@link #findUuidByName}）。MySQL 那份建表时就带了 {@code KEY pu_name_idx (name)}，
+     * SQLite 这份之前漏了 —— 于是同一个操作在 SQLite 后端上是全表扫。
+     * 用 {@code IF NOT EXISTS} 补：对没有索引的老库建上，对已建好的库是空操作。</p>
+     */
+    private static final String DDL_PLAYER_NAME_INDEX =
+            "CREATE INDEX IF NOT EXISTS pu_name_idx ON pu_player (name)";
+
+    /**
      * 建表语句跑完后补的「加列」语句，给已经存在的老库用。
      *
      * <p>新增（A2 保底分档）：{@code fail_star} 是后加的列，而
@@ -164,6 +175,7 @@ public class SqliteStorage implements Storage {
         try {
             try (Statement st = this.connection.createStatement()) {
                 st.executeUpdate(DDL_PLAYER);
+                st.executeUpdate(DDL_PLAYER_NAME_INDEX);
                 st.executeUpdate(DDL_STICKER);
                 st.executeUpdate(DDL_QUEST);
                 st.executeUpdate(DDL_DEX);
@@ -704,7 +716,58 @@ public class SqliteStorage implements Storage {
         }
     }
 
+    /**
+     * 删掉早于 {@code day} 的委托行。
+     *
+     * <p>日期是 {@code yyyy-MM-dd}，定长且字典序 = 时间序，直接字符串比较即可。</p>
+     */
+    public synchronized int purgeQuestsBefore(String day) {
+        if (this.connection == null || day == null || day.isEmpty()) {
+            return 0;
+        }
+        try (PreparedStatement ps = this.connection.prepareStatement(
+                "DELETE FROM pu_quest WHERE day < ?")) {
+            ps.setString(1, day);
+            return ps.executeUpdate();
+        } catch (SQLException ex) {
+            // 清理是维护动作，失败只留痕 —— 抛出去会让插件启用失败，代价远大于收益。
+            this.log("purgeQuestsBefore", ex);
+            return 0;
+        }
+    }
+
+    /**
+     * 批量写委托进度，语义与 {@link #setQuestProgress} 完全一致，只是合并成一次
+     * {@code executeBatch}（与 MySQL 侧对齐；SQLite 是本地文件，收益主要在语句复用）。
+     */
+    @Override
+    public synchronized void setQuestProgressBatch(UUID uuid, String day,
+                                                   Map<Integer, Integer> progressBySlot) {
+        if (progressBySlot == null || progressBySlot.isEmpty()) {
+            return;
+        }
+        if (this.connection == null) {
+            throw new StorageException("SQLite 连接不可用，无法写入委托进度(" + uuid + ")");
+        }
+        try (PreparedStatement ps = this.connection.prepareStatement(
+                "UPDATE pu_quest SET progress = ? WHERE uuid = ? AND day = ? AND slot = ?")) {
+            for (Map.Entry<Integer, Integer> entry : progressBySlot.entrySet()) {
+                ps.setInt(1, Math.max(entry.getValue(), 0));
+                ps.setString(2, uuid.toString());
+                ps.setString(3, day);
+                ps.setInt(4, entry.getKey().intValue());
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        } catch (SQLException ex) {
+            this.log("setQuestProgressBatch", ex);
+            throw new StorageException("SQLite 写入 setQuestProgressBatch(" + uuid + "/" + day + ") 失败: "
+                    + ex.getMessage(), ex);
+        }
+    }
+
     // ------------------------------------------------------------------ 合成图鉴
+
 
     /** 图鉴里已收录的种族数（不同种族计数，不含重复产出）。 */
     public synchronized int dexSpeciesCount(UUID uuid) {
@@ -749,9 +812,9 @@ public class SqliteStorage implements Storage {
      * <p>先 {@code INSERT OR IGNORE} 建行、再 {@code amount = amount + 1} ——
      * 这样「首次收录」和「重复产出」是同一条路径，不需要先查一次再决定插还是更。</p>
      */
-    public synchronized int dexAdd(UUID uuid, String name, String species) {
+    public synchronized void dexAdd(UUID uuid, String name, String species) {
         if (species == null) {
-            return 0;
+            return;
         }
         if (this.connection == null) {
             throw new StorageException("SQLite 连接不可用，无法写入图鉴(" + name + "/" + species + ")");
@@ -759,6 +822,9 @@ public class SqliteStorage implements Storage {
         this.touchPlayer(uuid, name);
         String id = uuid.toString();
         try {
+            // 这里刻意不写成 UPSERT（`ON CONFLICT ... DO UPDATE`）：服务端自带的
+            // sqlite-jdbc 是 3.21，没有这个语法；插件虽然打包了 3.42 并做了重定位，
+            // 但「万一重定位没生效就整段抛异常」的代价太大。本地文件两次语句的成本接近于零。
             try (PreparedStatement ps = this.connection.prepareStatement(
                     "INSERT OR IGNORE INTO pu_dex (uuid, species, amount) VALUES (?, ?, 0)")) {
                 ps.setString(1, id);
@@ -776,7 +842,6 @@ public class SqliteStorage implements Storage {
             throw new StorageException("SQLite 写入 dexAdd(" + name + "/" + species + ") 失败: "
                     + ex.getMessage(), ex);
         }
-        return this.dexAmount(uuid, species);
     }
 
     /** 某个种族的产出次数。 */

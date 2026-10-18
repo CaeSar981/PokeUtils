@@ -542,9 +542,26 @@ public class CachedStorage implements Storage {
         this.backend.setQuestProgress(uuid, day, slot, progress);
     }
 
+    /** 批量版同样直通后端 —— 委托数据不在缓存里，没有需要同步的内存状态。 */
+    @Override
+    public void setQuestProgressBatch(UUID uuid, String day, java.util.Map<Integer, Integer> bySlot) {
+        this.backend.setQuestProgressBatch(uuid, day, bySlot);
+    }
+
     @Override
     public void setQuestClaimed(UUID uuid, String day, int slot) {
         this.backend.setQuestClaimed(uuid, day, slot);
+    }
+
+    /**
+     * 清理旧委托行。
+     *
+     * <p>直接转发给后端 —— 委托数据本来就不在缓存里（见上面那段说明），
+     * 这里没有需要同步失效的内存状态。</p>
+     */
+    @Override
+    public int purgeQuestsBefore(String day) {
+        return this.backend.purgeQuestsBefore(day);
     }
 
     @Override
@@ -563,8 +580,8 @@ public class CachedStorage implements Storage {
     }
 
     @Override
-    public int dexAdd(UUID uuid, String name, String species) {
-        return this.backend.dexAdd(uuid, this.remember(uuid, name), species);
+    public void dexAdd(UUID uuid, String name, String species) {
+        this.backend.dexAdd(uuid, this.remember(uuid, name), species);
     }
 
     @Override

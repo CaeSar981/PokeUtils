@@ -119,6 +119,15 @@ Pixelmon（1.12.2）服务器的**精灵合成**插件。由原始 jar `PokeUtil
 它们都要针对「队伍里的某一只精灵」做事，而聊天栏里没法直观指认「第几只」；
 用界面选就不会选错，也不用记参数顺序。
 
+**Tab 补全**（第十轮新增）：`/pu` 全链路都有补全 —— 子命令、玩家名、粘剂键、数量、
+`top` / `migrate` 的枚举参数。两条规则值得知道：
+
+- **按权限与开关过滤**：没有 `pokeutils.admin` 的玩家看不到 `g` / `take` / `reload`；
+  功能被 `Compound.*.enabled` 关掉时，对应子命令也不出现在候选里
+  （与 `/pu` 无参帮助同一套规则 —— 否则等于在补全栏里推荐一个「敲下去只会说没权限」的命令）。
+- **玩家名只补在线的**：离线名单要么查库、要么走 `Bukkit.getOfflinePlayer`（正版服会请求
+  Mojang），都不能放在一个每秒可能触发多次的路径上。
+
 权限节点已写进 `plugin.yml`（原插件一个都没声明）：
 
 | 节点 | 默认 | 用途 |
@@ -1043,6 +1052,166 @@ MySQL 侧有四个坑，都收敛在 `MysqlStorage` 里：
 - **`/pu storage` 已经能看见这件事。** 缓存玩家数、未落盘条目、写队列积压、连续失败、熔断剩余时间、
   流水索引条数都在里面 —— 判断「是不是在泄漏」看它比翻日志快。
 
+### 33. 2026-10-18：查询入口收敛 / 数据卫生 / Tab 补全
+
+第三十二轮把「跑久了会怎样」修了一轮，但留了六个尾巴。这一轮全部收掉，**玩法一行没动**。
+
+#### 33.1 产出池只有一个入口了
+
+原来「某星级能出哪些精灵」这件事，在四个地方各写了一遍：
+
+| 调用方 | 原来的写法 |
+| --- | --- |
+| 主界面产出预览（`PlayerData`） | `PokeUtils#getPreviewPool` → `new PokeStarAPI().getStarPokemon(...)` |
+| 预览图标（`PreviewIcons`） | 同上 |
+| 合成点击的空池防护（监听器） | 又 `new PokeStarAPI()` 自己取一遍 |
+| 启动自检（`checkStarPools`） | 再 `new` 一个 `PokeStarAPI` 取一遍 |
+
+而 `getStarPokemon` 内部是「把整张 stars.yml 线性扫一遍」。于是同一次合成、同一个界面，
+同一份数据被反复扫。现在：
+
+- `getPreviewPool` 复用插件里的 `starApi` 单例，并按档位缓存（键只有 1~7 个，无需上限保护）；
+- 返回**不可变视图**，调用方改不动共享数据；空池**不缓存**（PokeStar 未就绪或 stars.yml
+  写坏时返回空，固化下来会让这一档永远合不了，只有重启才能恢复）；
+- 合成点击的空池防护直接调 `getPreviewPool`；
+- 启动自检也走它，顺带把 7 个档位灌进缓存；
+- 失效点并入 `clearStarCache()` —— 与星级缓存、预览图标同一条命。
+
+顺手还删掉一个死参数：`broadcastCompound(p, star, pokemon, psa)` 里的 `psa` 从来没被用过。
+
+#### 33.2 星级查询的三处漏网
+
+`getPokemonStar` 在第三十二轮就有缓存了，但三处调用点仍在 `new PokeStarAPI()` 直接查：
+委托交付判定、分解回收判定、合成点击里的池构造。**明明有缓存却没用** —— 现在全部改走
+`PokeUtils#getPokemonStar`。这类问题的根子是「同一个查询有多个入口」，所以 33.1 的
+「唯一入口」不只是性能问题，也是防止以后再漏。
+
+#### 33.3 数据卫生
+
+| 项 | 问题 | 现在 |
+| --- | --- | --- |
+| `pu_quest` 只进不出 | 每个玩家每天 3 行，而查询永远只看当天。1000 人服一年约 100 万行，备份体积与恢复时间都跟着涨 | 新增 `Compound.quest.keep-days`（默认 7）。启用时在**异步线程**上删掉更早的行（MySQL 这条 DELETE 会全表扫），失败只留痕 |
+| SQLite 的 `pu_player.name` 没有索引 | MySQL 建表时带了 `KEY pu_name_idx (name)`，SQLite 漏了 —— `/pu g` 给离线玩家发货按名查是**全表扫** | 建表后补 `CREATE INDEX IF NOT EXISTS`，老库也会被补上 |
+| `/pu g\|take` 数量没有上限 | `addSticker` 是「读当前值 + delta 写回」的整数运算，连敲两次 20 亿就溢出成负数、再被 `Math.max(0, ...)` 夹回 0 —— **一次「给予」把玩家粘剂清零，而控制台一切正常** | 单次上限 100 万，超出截断并明说「已按 1000000 处理」。不是业务限额，是防溢出 |
+
+清理截止日按「保留最近 N 天（含今天）」算，用 `java.time.LocalDate` 而不是手工减毫秒 ——
+跨夏令时/闰秒的边界上手工算术会错一天，而这只是维护动作，不值得引入这种风险。
+
+#### 33.4 Tab 补全
+
+全插件原来**一条 `onTabComplete` 都没有**（`grep onTabComplete` 为空）。`/pu` 有二十多个
+子命令、粘剂类型还随配置变化，运维只能靠记忆手打，打错了才收到一句「可用类型: PT, JL」——
+等于把一次报错当成了帮助。现在按参数位置分层补全：子命令 → 玩家名 → 粘剂键 → 数量，
+以及 `top` / `migrate` 的枚举参数。规则见「命令与权限」章节末尾。
+
+#### 33.5 刻意**没有**做的
+
+- **离线玩家名不补全**：要么查库（主线程）、要么请求 Mojang，都不能放在每秒可能触发多次的路径上。
+- **不做 `PokeUtils.java` 的拆分**：它已经三千行，是上帝类，但那是**重构**不是优化 ——
+  收益全在可维护性、风险全在回归上。除非准备大改，否则不划算。
+- **委托/图鉴仍不加内存缓存**、**`playerdatas` 仍不加锁**、**`LogIndex` 上限不动** —— 理由见 32.3。
+
+#### 33.6 测试
+
+`U 组`（U0~U9，30 条断言）：补全的权限过滤 / 开关过滤 / 前缀过滤 / 各参数位置、
+产出池缓存命中与失效、粘剂数量上限（真发 100 万再收回）、委托清理（`keep-days = 0` 不清理、
+`= 7` 清掉远古行且不误伤当天）。端到端基线 **705 → 735**。
+
+### 34. 2026-10-18：主线程写入往返收敛（8 → 3）
+
+第三十三轮把「重复劳动」清完了：渲染层不再有浪费、池与星级都只有一条入口。但**写路径**上
+还留着一件事 —— 一次「成功合成」在玩家点击的那一帧，最多会向数据库发出 **8 次往返**。
+局域网里每次 1~2ms，远程 MySQL 2~5ms，加起来就是点击后 20~40ms 的顿感。
+
+这一轮只动存储层与调用方式，**玩法零改动**。
+
+#### 34.1 `dexAdd`：4 次往返 → 1 次
+
+原来的实现是三步，而且都各占一次往返：
+
+```sql
+INSERT IGNORE INTO pu_dex (uuid, species, amount) VALUES (?, ?, 0);  -- ① 插一行 0
+UPDATE pu_dex SET amount = amount + 1 WHERE uuid = ? AND species = ?; -- ② 加 1
+SELECT amount FROM pu_dex WHERE uuid = ? AND species = ?;             -- ③ 把新值读回来
+```
+
+而**唯一的两个调用方（`PokeUtils#recordDex` 和 `StorageMigrator`）都把返回值丢掉**。
+现在合并成一条：
+
+```sql
+INSERT INTO pu_dex (uuid, species, amount) VALUES (?, ?, 1)
+ON DUPLICATE KEY UPDATE amount = amount + 1;
+```
+
+`amount = amount + 1` 依旧在 SQL 里完成，「读改写」仍然是数据库侧原子的 —— 这也是图鉴
+**仍然不加内存缓存**的原因（见 32.3）。接口签名从 `int dexAdd(...)` 改成 `void`：
+返回值没人要，却要为此多付一次往返，那就把契约写成它实际的样子。需要读数时用
+`dexAmount` / `dexAll`。
+
+> SQLite 侧刻意**没有**跟着换成 `ON CONFLICT ... DO UPDATE`：服务端自带的 sqlite-jdbc 是
+> 3.21，没有这个语法。插件虽然打包了 3.42 并做了重定位，但「万一重定位没生效就整段抛异常」
+> 的代价太大，而本地文件的两次语句成本接近于零。这里只删掉了尾部的 SELECT。
+
+#### 34.2 `touchPlayer`：同一 tick 只写一次
+
+每次 `dexAdd` / `setSticker` / 委托写入之前都会 `touchPlayer`（UPSERT 一行 `pu_player`）。
+一次成功合成会连着走到好几条写入路径，于是同一 tick 内对同一行重写同样的两个值 —— 除了
+往返没有任何作用。现在 MySQL 后端按 `uuid + 名字` 去重：
+
+- 名字没变 → 直接返回，不碰数据库；
+- 改名（值不同）→ 照写；
+- 进程内最多留 5000 条（每个玩家约 100 字节），超了整体清空，代价只是「多写一次」
+  —— 与 `CachedStorage#nameIndex` 同一策略。
+
+`updated_at` 因此变成「最近一次真正走到写路径的时间」而不是每次操作都刷新。没有功能
+依赖它做在线判定（在线状态始终以 `Bukkit.getPlayer` 为准）。
+
+#### 34.3 委托进度：一次读面板、一次批量写
+
+一次成功合成要同时推进「成功合成」与「尝试合成」两条委托。原来的写法是连着调两次
+
+```java
+addQuestProgress(p, QuestType.SUCCESS, 1);
+addQuestProgress(p, QuestType.ATTEMPT, 1);
+```
+
+而每次调用都会 `getQuestBoard(p)` —— 把**今天的委托面板从库里读一遍**。于是同一份数据
+读两遍、写两次。现在新增了一个数组重载：
+
+```java
+addQuestProgress(p, new String[]{QuestType.SUCCESS, QuestType.ATTEMPT}, 1);
+```
+
+内部只读一次面板，把要改的 `slot -> progress` 攒进一个 Map，走新增的
+`Storage#setQuestProgressBatch` 一次 `executeBatch` 写回。单类版本变成
+`new String[]{type}` 的转发，语义逐字未变（跳过已领取 / 已完成，封顶到 target，
+没有实际变化的槽位不写）。
+
+接口里 `setQuestProgressBatch` 是 **default 方法**（默认逐条调用），所以任何第三方或测试
+实现不改也能编译；内置的 SQLite 与 MySQL 后端都覆盖成了真正的批量。批量**不开事务**：
+委托进度是单调推进的计数，多推进一条不会多发奖励（领奖另有 `claimed` 判重）。
+
+#### 34.4 图鉴：打开一次 3 次查询 → 2 次
+
+`PlayerData#openDexGui` 原来是 `getDexAll`（全量行）+ `totalDexAmount`（**内部又调一次
+`getDexAll`**）+ `getDexClaimed`。图鉴收满 300 种时，每翻一页就是两次 300 行的往返。
+现在 `totalDexAmount` 直接对**已经查到的那个 Map** 求和 —— 纯内存操作，没有再查一次的理由。
+
+#### 34.5 效果
+
+一次成功合成的主线程往返：**8 → 3**（图鉴 1 + 委托面板 1 + 批量写 1）。远程 MySQL 上
+大致从 20~40ms 降到 6~12ms。失败路径（只推进 ATTEMPT）从 5 次降到 2~3 次。
+
+#### 34.6 测试
+
+`U 组` 补两步（U10 / U11，6 条断言）：
+
+- **U10**：同一物种连产 3 次 → 计数 3、新物种从 1 开始、物种数/总次数分别正确。
+  换 UPSERT 之后最容易错的是「覆盖而不是累加」，这条正面钉住它。
+- **U11**：一次调用推进两条委托，**从库里读回**校验两条都 +1（不是只改了内存里的 board）。
+
+端到端基线 **735 → 741**。
+
 ## 配置一览（第三轮新增键）
 
 | 键 | 默认 | 说明 |
@@ -1100,6 +1269,7 @@ MySQL 侧有四个坑，都收敛在 `MysqlStorage` 里：
 | `Compound.sticker-craft.recipes[]` | 1 条 `PT→JL` 示例 | 每条 = `from` / `to` / `amount` / `result` / `money` |
 | `Compound.quest.enabled` | `true` | 每日委托开关 |
 | `Compound.quest.daily-amount` | `3` | 每天生成几条 |
+| `Compound.quest.keep-days` | `7` | 委托记录保留天数（含今天）；启用时异步清掉更早的行，`0` = 不清理 |
 | `Compound.quest.types.<TYPE>.weight` | 见 `config.yml` | 生成权重（`0` = 不生成该类） |
 | `Compound.quest.types.<TYPE>.targets` | 见 `config.yml` | 目标次数档次；`SUBMIT` 另有 `star` 门槛 |
 | `Compound.quest.types.<TYPE>.display` | 见 `config.yml` | 文案，占位符 `{target}` / `{star}` |

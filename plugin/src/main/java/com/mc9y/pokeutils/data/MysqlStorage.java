@@ -17,6 +17,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
@@ -74,6 +75,22 @@ public class MysqlStorage implements Storage {
     private volatile boolean open;
     /** 建表只做一次；失败时留个标记，避免每条 SQL 都白跑一遍。 */
     private volatile boolean schemaReady;
+
+    /**
+     * 本进程内「已经写过名字」的玩家：uuid -> 最近一次写入的名字。
+     *
+     * <p>一次成功合成会连着走到好几条写入路径（{@code dexAdd}、委托进度、粘剂扣减、
+     * 连败次数），每条都自带一次 {@code touchPlayer} 的 UPSERT —— 同一 tick 内对同一行
+     * 重写同样的两个值，除了多一次网络往返没有任何作用。这里按「uuid + 名字」去重：
+     * 名字变了（改名）会重新写，玩家行被外部删掉这种极端情况下一轮合成也会补回来。</p>
+     *
+     * <p>不清理也不会无限涨（每个玩家长驻一行 UUID + 名字，约 100 字节），但仍旧加了
+     * 上限 —— 与 {@code CachedStorage#nameIndex} 同一策略：超了整体清空，代价只是
+     * 「多写一次」。{@code updated_at} 的语义因此变成「最近一次真正走到写路径的时间」，
+     * 而不是每次操作都刷新；没有功能依赖它做在线判定。</p>
+     */
+    private final Map<UUID, String> touchedNames = new ConcurrentHashMap<UUID, String>();
+    private static final int TOUCHED_NAMES_LIMIT = 5000;
 
     public MysqlStorage(Logger logger, String host, int port, String database, String user,
                         String password, String tablePrefix, boolean useSsl, String serverTimezone,
@@ -449,6 +466,11 @@ public class MysqlStorage implements Storage {
 
     @Override
     public void touchPlayer(UUID uuid, String name) {
+        String safe = name == null ? "" : name;
+        // 名字没变就不用再写一遍 —— 见 touchedNames 的说明。
+        if (safe.equals(this.touchedNames.get(uuid))) {
+            return;
+        }
         Connection connection = null;
         try {
             connection = this.borrow();
@@ -457,10 +479,14 @@ public class MysqlStorage implements Storage {
                             + " VALUES (?, ?, 0, ?)"
                             + " ON DUPLICATE KEY UPDATE name = VALUES(name), updated_at = VALUES(updated_at)")) {
                 ps.setString(1, uuid.toString());
-                ps.setString(2, MysqlStorage.truncate(name, 32));
+                ps.setString(2, MysqlStorage.truncate(safe, 32));
                 ps.setLong(3, System.currentTimeMillis());
                 ps.executeUpdate();
             }
+            if (this.touchedNames.size() >= TOUCHED_NAMES_LIMIT) {
+                this.touchedNames.clear();
+            }
+            this.touchedNames.put(uuid, safe);
         } catch (SQLException ex) {
             this.logger.log(java.util.logging.Level.SEVERE, "MySQL 写入失败(touchPlayer): " + ex, ex);
             throw new StorageException("MySQL 写入 touchPlayer(" + name + ") 失败: " + ex.getMessage(), ex);
@@ -871,6 +897,73 @@ public class MysqlStorage implements Storage {
         }
     }
 
+    /**
+     * 删掉早于 {@code day} 的委托行。
+     *
+     * <p>日期是 {@code yyyy-MM-dd}，定长且字典序 = 时间序，直接字符串比较即可。
+     * 表上主键是 {@code (uuid, day, slot)}，{@code day} 不是前缀 —— 这条 DELETE 会走
+     * 全表扫，但一天只跑一次、且只删远端历史行，代价可以接受。</p>
+     */
+    @Override
+    public int purgeQuestsBefore(String day) {
+        if (day == null || day.isEmpty()) {
+            return 0;
+        }
+        Connection connection = null;
+        try {
+            connection = this.borrow();
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "DELETE FROM " + this.table("quest") + " WHERE `day` < ?")) {
+                ps.setString(1, day);
+                return ps.executeUpdate();
+            }
+        } catch (SQLException ex) {
+            // 清理是维护动作，失败只留痕（返回 0）—— 不该让插件启用失败。
+            this.logger.log(java.util.logging.Level.WARNING,
+                    "MySQL 清理旧委托失败(purgeQuestsBefore): " + ex, ex);
+            return 0;
+        } finally {
+            this.release(connection);
+        }
+    }
+
+    /**
+     * 批量写委托进度：同一份 SQL、同一个连接、一次 {@code executeBatch}。
+     *
+     * <p>一次成功合成要同时推进 SUCCESS 与 ATTEMPT 两条委托，原来是两次独立往返 ——
+     * 而且都发生在玩家点击的那一帧。这两条 SQL 结构完全一致，只是参数不同，
+     * 没有任何理由分两次发送。</p>
+     */
+    @Override
+    public void setQuestProgressBatch(UUID uuid, String day, Map<Integer, Integer> progressBySlot) {
+        if (progressBySlot == null || progressBySlot.isEmpty()) {
+            return;
+        }
+        Connection connection = null;
+        try {
+            connection = this.borrow();
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "UPDATE " + this.table("quest") + " SET progress = ?"
+                    + " WHERE uuid = ? AND `day` = ? AND slot = ?")) {
+                for (Map.Entry<Integer, Integer> entry : progressBySlot.entrySet()) {
+                    ps.setInt(1, Math.max(entry.getValue(), 0));
+                    ps.setString(2, uuid.toString());
+                    ps.setString(3, day);
+                    ps.setInt(4, entry.getKey().intValue());
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+        } catch (SQLException ex) {
+            this.logger.log(java.util.logging.Level.SEVERE,
+                    "MySQL 写入失败(setQuestProgressBatch): " + ex, ex);
+            throw new StorageException("MySQL 写入 setQuestProgressBatch(" + uuid + "/" + day + ") 失败: "
+                    + ex.getMessage(), ex);
+        } finally {
+            this.release(connection);
+        }
+    }
+
     // ------------------------------------------------------------------ 合成图鉴
 
     @Override
@@ -911,24 +1004,19 @@ public class MysqlStorage implements Storage {
     }
 
     @Override
-    public int dexAdd(UUID uuid, String name, String species) {
+    public void dexAdd(UUID uuid, String name, String species) {
         if (species == null) {
-            return 0;
+            return;
         }
         this.touchPlayer(uuid, name);
         Connection connection = null;
         try {
             connection = this.borrow();
+            // 一句顶三句：原来「INSERT IGNORE 插 0 + UPDATE 加 1 + SELECT 读回」是三次往返，
+            // 而唯一调用方把读回的值直接丢掉。UPSERT 本身就是原子的，MySQL 5.1 起就支持。
             try (PreparedStatement ps = connection.prepareStatement(
-                    "INSERT IGNORE INTO " + this.table("dex")
-                    + " (uuid, species, amount) VALUES (?, ?, 0)")) {
-                ps.setString(1, uuid.toString());
-                ps.setString(2, species);
-                ps.executeUpdate();
-            }
-            try (PreparedStatement ps = connection.prepareStatement(
-                    "UPDATE " + this.table("dex") + " SET amount = amount + 1"
-                    + " WHERE uuid = ? AND species = ?")) {
+                    "INSERT INTO " + this.table("dex") + " (uuid, species, amount) VALUES (?, ?, 1)"
+                            + " ON DUPLICATE KEY UPDATE amount = amount + 1")) {
                 ps.setString(1, uuid.toString());
                 ps.setString(2, species);
                 ps.executeUpdate();
@@ -940,7 +1028,6 @@ public class MysqlStorage implements Storage {
         } finally {
             this.release(connection);
         }
-        return this.dexAmount(uuid, species);
     }
 
     @Override

@@ -146,8 +146,46 @@ public interface Storage {
     /** 写入某条委托的进度（绝对值）。 */
     void setQuestProgress(UUID uuid, String day, int slot, int progress);
 
+    /**
+     * 一次写入多条委托进度：{@code slot -> progress}。
+     *
+     * <p>存在的理由只有一个 —— <b>少一次往返</b>。一次成功合成会同时推进
+     * {@code SUCCESS} 与 {@code ATTEMPT} 两条委托，原来的写法是调两次
+     * {@link #setQuestProgress}，在 MySQL 上就是两次独立的网络往返，都发生在玩家点击的
+     * 那一帧。默认实现退化成逐条调用（对任何第三方/测试实现仍然可用），内置的两个
+     * 后端都覆盖成了一次 {@code executeBatch}。</p>
+     *
+     * <p>原子性说明：批量里的任何一条失败都会抛 {@link StorageException}，已经写过的那几条
+     * 不回滚 —— 委托进度是「单调推进的计数」，多推进一条不会给玩家多发的奖励
+     * （领奖另有 {@code claimed} 判重），所以这里不做事务。</p>
+     */
+    default void setQuestProgressBatch(UUID uuid, String day, Map<Integer, Integer> progressBySlot) {
+        if (progressBySlot == null || progressBySlot.isEmpty()) {
+            return;
+        }
+        for (Map.Entry<Integer, Integer> entry : progressBySlot.entrySet()) {
+            this.setQuestProgress(uuid, day, entry.getKey().intValue(), entry.getValue().intValue());
+        }
+    }
+
     /** 把某条委托标记为已领取。 */
     void setQuestClaimed(UUID uuid, String day, int slot);
+
+    /**
+     * 删除早于 {@code day} 的委托记录，返回删除的行数。
+     *
+     * <p>{@code day} 是 {@code yyyy-MM-dd}，字典序即时间序，所以实现里可以直接写
+     * {@code day < ?}，不必解析日期。传当天日期即「只保留今天」。</p>
+     *
+     * <p><b>为什么需要它</b>：委托表是「每个玩家每天 3 行、只增不减」的，而查询永远只看
+     * 当天 —— 历史行除了占磁盘没有任何用途。1000 人服跑一年就是 100 万行，备份体积和
+     * 恢复时间都跟着涨。保留天数由 {@code Compound.quest.keep-days} 控制，0 = 不清理
+     * （保留历史，供运维自己查）。</p>
+     *
+     * <p>失败语义与查询一致：<b>留痕 + 返回 0</b>，不抛 {@code StorageException} ——
+     * 清理失败不该让插件启用失败，也不该阻止玩家用委托功能。</p>
+     */
+    int purgeQuestsBefore(String day);
 
     // ------------------------------------------------------------------ 合成图鉴
 
@@ -160,8 +198,15 @@ public interface Storage {
     /** 图鉴内容快照：种族名 -> 产出次数（按次数倒序，界面直接顺序渲染）。 */
     Map<String, Integer> dexAll(UUID uuid);
 
-    /** 记录一次产出，返回该种族累计产出次数。 */
-    int dexAdd(UUID uuid, String name, String species);
+    /**
+     * 记录一次产出（该种族的累计次数 +1）。
+     *
+     * <p>刻意<b>不返回</b>新值：取回它要在写完之后再跑一次 SELECT，而仅有的两个调用方
+     * （{@code PokeUtils#recordDex} 与 {@code StorageMigrator}）都把返回值丢掉。
+     * 需要读数时用 {@link #dexAmount} 或 {@link #dexAll} —— 不要为了一个没人要的
+     * 返回值在合成成功的那一帧多付一次网络往返。</p>
+     */
+    void dexAdd(UUID uuid, String name, String species);
 
     /** 某个种族的产出次数。 */
     int dexAmount(UUID uuid, String species);

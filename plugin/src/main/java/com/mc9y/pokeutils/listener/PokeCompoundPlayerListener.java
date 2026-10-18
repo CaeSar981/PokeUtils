@@ -4,7 +4,6 @@ import com.mc9y.msgtoggle.MSGToggle;
 import com.mc9y.pokemonapi.api.event.CustomEvent;
 import com.mc9y.pokemonapi.api.pokemon.PokemonUtil;
 import com.mc9y.pokemonapi.api.storage.PlayerStorageUtil;
-import com.mc9y.pokestar.PokeStarAPI;
 import com.mc9y.pokeutils.PokeUtils;
 import com.mc9y.pokeutils.data.CachedStorage;
 import com.mc9y.pokeutils.data.LegacyDataMigration;
@@ -211,7 +210,6 @@ public class PokeCompoundPlayerListener implements Listener {
                                 boolean hasSticker = !stickerRequired || pd.getYS() != null;
 
                                 if (hasMaterials && hasSticker) {
-                                    PokeStarAPI psa = new PokeStarAPI();
                                     // 新增（A1）：「队伍至少剩一只」只统计**队伍来源**的材料。
                                     // 从电脑盒子取料不会让队伍变少 —— 若仍按 need 去扣，
                                     // 「材料全在盒子里、队伍只有一只」这种完全正常的用法会被误拒。
@@ -306,7 +304,11 @@ public class PokeCompoundPlayerListener implements Listener {
                                                 // 玩家净亏，而控制台只留一行报错。治本靠修 stars.yml，这里是不依赖外部数据的兜底。
                                                 // 注意：提示文案只用档位数字，不引用 PokeUtils.getInstance().getStarDisplay() ——
                                                 // 档位缺失时它返回空串，正是本分支要处理的情况。
-                                                List<String> starPMs = psa.getStarPokemon(star1 + 1);
+                                                // 修复（收敛查询入口）：原来这里 `new PokeStarAPI()` 直接取池，
+                                                // 与主界面预览、预览图标各扫一遍同一张星级表。改走插件里带缓存的
+                                                // 唯一入口 —— 数据源没变，只是不再重复扫；空池语义也一致。
+                                                List<String> starPMs =
+                                                        PokeUtils.getInstance().getPreviewPool(star1 + 1);
                                                 if (starPMs == null || starPMs.isEmpty()) {
                                                     p.sendMessage("§3精灵合成 §f|| §c目标 " + (star1 + 1)
                                                             + " 星档位的产出池为空, 已中止合成, 未扣除任何物品!");
@@ -424,8 +426,10 @@ public class PokeCompoundPlayerListener implements Listener {
                                                         // 第四轮新增：图鉴收录 + 委托进度。
                                                         // 图鉴只记「产出过的种族」，同一只重复产出会累加次数。
                                                         PokeUtils.getInstance().recordDex(p, pokemon.getSpecies().name());
-                                                        PokeUtils.getInstance().addQuestProgress(p, QuestType.SUCCESS, 1);
-                                                        PokeUtils.getInstance().addQuestProgress(p, QuestType.ATTEMPT, 1);
+                                                        // 一次调用推进两条委托：原来是 SUCCESS / ATTEMPT 各调一次，
+                                                        // 同一 tick 内把今天的委托面板从库里读了两遍。
+                                                        PokeUtils.getInstance().addQuestProgress(p,
+                                                                new String[]{QuestType.SUCCESS, QuestType.ATTEMPT}, 1);
                                                         // 新增：合成流水日志（原插件一次 getLogger() 都没调过）
                                                         PokeUtils.getInstance().logCompound(p.getName(), star1, pd.getYS(), true,
                                                                 money, 0, "产出 " + PokeUtils.getInstance().getStarDisplay(star1 + 1)
@@ -433,7 +437,7 @@ public class PokeCompoundPlayerListener implements Listener {
                                                                         + (useVoucher ? " (合成券)" : "")
                                                                         + (inheritDetail.isEmpty() ? "" : " 继承[" + inheritDetail + "]"));
                                                         // 修复：播报阈值与文案原来写死（>=6 星 + 固定文案），现由配置提供。
-                                                        broadcastCompound(p, star1 + 1, pokemon, psa);
+                                                        broadcastCompound(p, star1 + 1, pokemon);
                                                     } else {
                                                         // 新增（A2）：换档就重新计数。原来的那些连败属于别的档位，
                                                         // 沿用它们等于让低星档「垫」出来的进度被高星档消费掉。
@@ -1377,7 +1381,7 @@ public class PokeCompoundPlayerListener implements Listener {
      * 并且对 MSGToggle 的调用做了兜底 —— 它虽然是 plugin.yml 里声明的硬依赖，
      * 但运行期真拿到 null 时也只是「少一条播报」，不该连带把合成结果炸掉。</p>
      */
-    private static void broadcastCompound(Player p, int star, Pokemon pokemon, PokeStarAPI psa) {
+    private static void broadcastCompound(Player p, int star, Pokemon pokemon) {
         PokeUtils plugin = PokeUtils.getInstance();
         if (!plugin.isBroadcastEnabled() || star < plugin.getBroadcastMinStar()) {
             return;

@@ -31,6 +31,7 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
@@ -44,6 +45,7 @@ import org.bukkit.OfflinePlayer;
 import org.bukkit.Sound;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.command.TabCompleter;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.craftbukkit.v1_12_R1.inventory.CraftItemStack;
 import org.bukkit.entity.Player;
@@ -59,7 +61,7 @@ import org.bukkit.plugin.java.JavaPlugin;
  * <p>提供精灵合成（2 只同星级精灵 + 粘剂 + 金币 -> 1 只高星级精灵）功能的 GUI 插件。
  * 依赖 PokeStar / Vault / PokemonAPI / MSGToggle。</p>
  */
-public class PokeUtils extends JavaPlugin {
+public class PokeUtils extends JavaPlugin implements TabCompleter {
 
     private static PokeUtils pu;
 
@@ -155,6 +157,11 @@ public class PokeUtils extends JavaPlugin {
 
     private static final boolean DEFAULT_QUEST_ENABLED = true;
     private static final int DEFAULT_QUEST_AMOUNT = 3;
+    /** 数量类参数的补全提示。只是「常用值」，不限制玩家手打别的数字。 */
+    private static final List<String> TAB_AMOUNTS =
+            Collections.unmodifiableList(Arrays.asList("1", "10", "50", "100"));
+    /** 委托记录保留天数（含今天）。0 = 不清理。 */
+    private static final int DEFAULT_QUEST_KEEP_DAYS = 7;
     private static final String[] DEFAULT_QUEST_KEYS = {"SUCCESS", "ATTEMPT", "SALVAGE", "STICKER", "SUBMIT"};
     private static final int[] DEFAULT_QUEST_WEIGHTS = {3, 3, 2, 2, 2};
     private static final String[] DEFAULT_QUEST_TARGETS = {"2,3,5", "3,5,8", "1,2,3", "1,2,3", "1"};
@@ -1039,14 +1046,40 @@ public class PokeUtils extends JavaPlugin {
         return size < 9 ? 9 : (size > 54 ? 54 : size);
     }
 
-    /** 某星级档位（成品星级，1~7）的全部可能产出，取自真实 PokeStar。 */
+    /**
+     * 某星级档位（成品星级，1~7）的全部可能产出，取自真实 PokeStar。
+     *
+     * <p><b>这是「产出池」的唯一入口</b> —— 主界面预览、预览图标、合成时的空池防护、
+     * 启动自检全部走它。以前每处各写一遍 {@code new PokeStarAPI().getStarPokemon(...)}，
+     * 于是同一份数据在一次合成里被扫了好几遍（每次都是整张星级表线性扫描）。</p>
+     *
+     * <p>返回的是<b>不可变视图</b>，调用方只读；缓存键是档位（1~7），空间固定，
+     * 不需要上限保护。失效点与星级缓存同一个（{@link #clearStarCache()}）。</p>
+     *
+     * <p>空池<b>不入缓存</b>：PokeStar 尚未就绪、或 stars.yml 某一档写坏时都会返回空，
+     * 把它固化下来会让这一档永远合不了（只有重启才恢复）。空池每次重新问一次，
+     * 代价只在这种异常路径上。</p>
+     */
     public List<String> getPreviewPool(int level) {
-        try {
-            List<String> pool = new PokeStarAPI().getStarPokemon(level);
-            return pool == null ? new ArrayList<String>() : pool;
-        } catch (Throwable t) {
-            return new ArrayList<String>();
+        Integer key = Integer.valueOf(level);
+        List<String> cached = this.poolCache.get(key);
+        if (cached != null) {
+            return cached;
         }
+        List<String> pool;
+        try {
+            List<String> raw = this.starApi.getStarPokemon(level);
+            // 复制一份：PokeStar 返回的可能是它自己的内部列表，不能直接当缓存引用出去。
+            pool = raw == null ? new ArrayList<String>() : new ArrayList<String>(raw);
+        } catch (Throwable t) {
+            pool = new ArrayList<String>();
+        }
+        if (pool.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<String> immutable = Collections.unmodifiableList(pool);
+        List<String> raced = this.poolCache.putIfAbsent(key, immutable);
+        return raced != null ? raced : immutable;
     }
 
     // ================================================================ 星级查询（带缓存）
@@ -1072,8 +1105,25 @@ public class PokeUtils extends JavaPlugin {
     private final java.util.concurrent.ConcurrentHashMap<Integer, String> starDisplayCache =
             new java.util.concurrent.ConcurrentHashMap<Integer, String>();
 
+    /**
+     * {@code /pu g|take} 单次允许变更的粘剂数量上限。
+     *
+     * <p>不是业务限额，而是<b>防整数溢出</b>：粘剂在存储层是 INT，且 {@code addSticker}
+     * 走「读改写」。正常运营不会单次发到百万，取这个数只是把「不可能出现的输入」
+     * 关在门外，同时留足余量给任何合理的批量补偿。</p>
+     */
+    private static final int MAX_STICKER_AMOUNT = 1000000;
+
     /** 星级缓存条目上限。种族总数远小于它，超限只会出现在异常调用下。 */
     private static final int STAR_CACHE_LIMIT = 4096;
+
+    /**
+     * 成品星级（1~7）-> 该档位的产出池（不可变）。
+     *
+     * <p>键空间固定 7 个，没有增长风险；空池不写入，理由见 {@link #getPreviewPool(int)}。</p>
+     */
+    private final java.util.concurrent.ConcurrentHashMap<Integer, List<String>> poolCache =
+            new java.util.concurrent.ConcurrentHashMap<Integer, List<String>>();
 
     /** 复用的 API 实例（构造是空实现，但没必要每次 new）。 */
     private final PokeStarAPI starApi = new PokeStarAPI();
@@ -1129,6 +1179,8 @@ public class PokeUtils extends JavaPlugin {
     public void clearStarCache() {
         this.starCache.clear();
         this.starDisplayCache.clear();
+        // 产出池与星级同源（都来自 PokeStar 的 stars.yml），同样一起失效。
+        this.poolCache.clear();
         // 产出预览的图标完全由 stars.yml 决定，跟星级缓存同源同命，一起失效。
         PreviewIcons.invalidate();
     }
@@ -1144,22 +1196,11 @@ public class PokeUtils extends JavaPlugin {
         // 自检本身要读的就是「当前生效的 stars.yml」，顺手把星级缓存清掉 ——
         // 启用与 /pu reload 都会走这里，正好是这套缓存唯一的失效点。
         this.clearStarCache();
-        PokeStarAPI api;
-        try {
-            api = new PokeStarAPI();
-        } catch (Throwable t) {
-            this.getLogger().warning("无法初始化 PokeStarAPI，跳过产出池自检: " + t);
-            return;
-        }
+        // 顺带把 7 个档位的产出池灌进缓存：紧接着的界面渲染与合成判定都直接命中，
+        // 不必再各扫一遍整张星级表。
         List<String> empty = new ArrayList<String>();
         for (int level = 1; level <= 7; level++) {
-            List<String> pool;
-            try {
-                pool = api.getStarPokemon(level);
-            } catch (Throwable t) {
-                pool = null;
-            }
-            if (pool == null || pool.isEmpty()) {
+            if (this.getPreviewPool(level).isEmpty()) {
                 empty.add(String.valueOf(level));
             }
         }
@@ -1481,6 +1522,41 @@ public class PokeUtils extends JavaPlugin {
         return Math.max(this.getConfig().getInt("Compound.quest.daily-amount", DEFAULT_QUEST_AMOUNT), 0);
     }
 
+    /**
+     * 委托记录保留多少天（含今天）。{@code 0} = 不清理。
+     *
+     * <p>委托表是「每个玩家每天 3 行、只增不减」，而查询永远只看当天。默认保留 7 天：
+     * 足够运维回头查「这玩家的委托是不是没刷新」，又不至于让它无限长。</p>
+     */
+    public int getQuestKeepDays() {
+        return Math.max(this.getConfig().getInt("Compound.quest.keep-days", DEFAULT_QUEST_KEEP_DAYS), 0);
+    }
+
+    /**
+     * 删掉超出保留期的委托行，返回删除行数。
+     *
+     * <p>截止日按「保留最近 N 天（含今天）」算：{@code keep-days = 7} 时，删掉
+     * {@code day < 今天-6} 的行。用 {@code LocalDate} 而不是手工减毫秒 —— 跨夏令时 /
+     * 闰秒的边界上手工算术会算错一天，而这里只是维护动作，不值得引入这种风险。</p>
+     */
+    public int purgeOldQuests() {
+        if (this.storage == null) {
+            return 0;
+        }
+        int keep = this.getQuestKeepDays();
+        if (keep <= 0) {
+            return 0;
+        }
+        String cutoff;
+        try {
+            cutoff = java.time.LocalDate.now().minusDays(keep - 1L).toString();
+        } catch (Throwable t) {
+            this.getLogger().warning("计算委托清理截止日失败，本次跳过: " + t);
+            return 0;
+        }
+        return this.storage.purgeQuestsBefore(cutoff);
+    }
+
     /** 委托类型定义（只保留 weight > 0 的），惰性加载 + 缓存。 */
     public List<QuestType> getQuestTypes() {
         if (this.questTypes == null) {
@@ -1610,23 +1686,54 @@ public class PokeUtils extends JavaPlugin {
      * 界面显示「7 / 3」这种数字。</p>
      */
     public void addQuestProgress(Player p, String type, int delta) {
-        if (!this.isQuestEnabled() || delta <= 0) {
+        this.addQuestProgress(p, new String[]{type}, delta);
+    }
+
+    /**
+     * 一次推进<b>多类</b>委托的进度。
+     *
+     * <p>存在的理由是「少一次往返」：一次成功合成会同时推进「成功合成」与「尝试合成」
+     * 两条委托，原实现是调两次上面的单类版本 —— 于是同一个 tick 内把今天的委托面板
+     * 从库里读了两遍。这里只读一遍、把要改的槽位攒起来、一次批量写回。</p>
+     *
+     * <p>顺序上仍然是「先读后写」，语义与单类版本逐字一致：跳过已领取 / 已完成的，
+     * 进度封顶到 target，没有实际变化的槽位不写。</p>
+     */
+    public void addQuestProgress(Player p, String[] types, int delta) {
+        if (!this.isQuestEnabled() || delta <= 0 || types == null || types.length == 0) {
             return;
         }
         String day = this.today();
-        for (QuestData quest : this.getQuestBoard(p)) {
-            if (!type.equals(quest.getType()) || quest.isClaimed() || quest.isComplete()) {
+        List<QuestData> board = this.getQuestBoard(p);
+        Map<Integer, Integer> updates = new LinkedHashMap<Integer, Integer>();
+        for (QuestData quest : board) {
+            if (quest.isClaimed() || quest.isComplete() || !containsType(types, quest.getType())) {
                 continue;
             }
             int next = Math.min(quest.getProgress() + delta, quest.getTarget());
             if (next == quest.getProgress()) {
                 continue;
             }
+            // 就地更新内存对象：界面正开着时下次重绘读的就是这份 board。
             quest.setProgress(next);
-            if (this.storage != null) {
-                this.storage.setQuestProgress(p.getUniqueId(), day, quest.getSlot(), next);
+            updates.put(quest.getSlot(), next);
+        }
+        if (updates.isEmpty() || this.storage == null) {
+            return;
+        }
+        this.storage.setQuestProgressBatch(p.getUniqueId(), day, updates);
+    }
+
+    private static boolean containsType(String[] types, String type) {
+        if (type == null) {
+            return false;
+        }
+        for (String candidate : types) {
+            if (type.equals(candidate)) {
+                return true;
             }
         }
+        return false;
     }
 
     /**
@@ -1656,7 +1763,7 @@ public class PokeUtils extends JavaPlugin {
             p.sendMessage("§3精灵合成 §f|| §c这条委托已经领取过了!");
             return false;
         }
-        int star = new PokeStarAPI().getPokemonStar(pokemon.getSpecies().name());
+        int star = this.getPokemonStar(pokemon.getSpecies().name());
         if (star < target.getStar()) {
             p.sendMessage("§3精灵合成 §f|| §c这条委托需要 " + starName(target.getStar())
                     + " 及以上的精灵, 你选的是 " + starName(star) + "!");
@@ -1932,7 +2039,7 @@ public class PokeUtils extends JavaPlugin {
             p.sendMessage("§3精灵合成 §f|| §c精灵蛋无法分解!");
             return false;
         }
-        int star = new PokeStarAPI().getPokemonStar(pokemon.getSpecies().name());
+        int star = this.getPokemonStar(pokemon.getSpecies().name());
         if (star < 1) {
             p.sendMessage("§3精灵合成 §f|| §c该精灵未被星级系统收录, 无法分解!");
             return false;
@@ -2211,6 +2318,24 @@ public class PokeUtils extends JavaPlugin {
             this.getLogger().warning("产出池自检失败: " + t);
         }
 
+        // 委托表只进不出：每个玩家每天 3 行，而查询永远只看当天 —— 历史行纯占磁盘。
+        // 启动时清一次超出保留期（Compound.quest.keep-days）的行。
+        // 放异步：MySQL 上这条 DELETE 走全表扫（day 不是主键前缀），大表能跑几百毫秒，
+        // 不该压在启用阶段的主线程上。失败只留痕，不影响任何玩法。
+        Async.compute(new Runnable() {
+            public void run() {
+                try {
+                    final int purged = PokeUtils.this.purgeOldQuests();
+                    if (purged > 0) {
+                        PokeUtils.this.getLogger().info("已清理 " + purged + " 条超过 "
+                                + PokeUtils.this.getQuestKeepDays() + " 天的委托记录。");
+                    }
+                } catch (Throwable t) {
+                    PokeUtils.this.getLogger().warning("清理旧委托记录失败: " + t);
+                }
+            }
+        });
+
         // 两个周期性维护任务，都跑在异步线程上，绝不占主线程：
         //   ① CachedStorage.sweep() —— 每秒扫一遍没落盘的脏数据，补上「重试放弃」与
         //      「玩家挂着不动」这两类永远不会自己再试的情况（详见 CachedStorage 类注释）。
@@ -2391,6 +2516,171 @@ public class PokeUtils extends JavaPlugin {
             this.handleMigrateCommand(sender, args);
         }
         return false;
+    }
+
+    // ================================================================ Tab 补全
+    // 规则与 /pu 无参帮助逐条对齐：
+    //   · 没有 pokeutils.admin 的人看不到管理指令（补全栏里推荐一个「敲下去只会说
+    //     没权限」的选项，比不补更糟）；
+    //   · 功能被 config 关掉时对应子命令也不出现（同上）。
+    // 只补**在线**玩家名：离线名要么查库、要么走 Bukkit.getOfflinePlayer（正版服会向
+    // Mojang 请求），都不能出现在一个玩家每秒可能触发多次的路径上。
+    @Override
+    public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        if (args == null || args.length == 0) {
+            return new ArrayList<String>();
+        }
+        // Bukkit 的约定：args 的最后一项是「玩家当前正在输入的那截」，
+        // 前面的都是已经敲完的完整参数。
+        String current = args[args.length - 1];
+        if (args.length == 1) {
+            return completeFrom(this.tabSubcommands(sender), current);
+        }
+
+        String sub = args[0].toLowerCase(Locale.ROOT);
+
+        // ---- /pu g | take <玩家> <类型> <数量>
+        if ("g".equals(sub) || "take".equals(sub)) {
+            if (!sender.hasPermission("pokeutils.admin")) {
+                return new ArrayList<String>();
+            }
+            if (args.length == 2) {
+                return completeFrom(this.tabOnlineNames(), current);
+            }
+            if (args.length == 3) {
+                return completeFrom(this.tabStickerKeys(), current);
+            }
+            if (args.length == 4) {
+                return completeFrom(TAB_AMOUNTS, current);
+            }
+            return new ArrayList<String>();
+        }
+
+        // ---- /pu top [count|star]
+        if ("top".equals(sub)) {
+            if (args.length == 2) {
+                return completeFrom(Arrays.asList("count", "star"), current);
+            }
+            return new ArrayList<String>();
+        }
+
+        // ---- /pu migrate <sqlite|mysql> [dry-run]
+        if ("migrate".equals(sub)) {
+            if (!sender.hasPermission("pokeutils.admin")) {
+                return new ArrayList<String>();
+            }
+            if (args.length == 2) {
+                return completeFrom(Arrays.asList("mysql", "sqlite"), current);
+            }
+            if (args.length == 3) {
+                return completeFrom(Collections.singletonList("dry-run"), current);
+            }
+            return new ArrayList<String>();
+        }
+
+        // ---- /pu history [玩家] [条数]
+        if ("history".equals(sub)) {
+            if (args.length == 2) {
+                return completeFrom(this.tabOnlineNames(), current);
+            }
+            if (args.length == 3) {
+                return completeFrom(TAB_AMOUNTS, current);
+            }
+            return new ArrayList<String>();
+        }
+
+        // ---- /pu stats [玩家|all]
+        if ("stats".equals(sub)) {
+            if (args.length == 2) {
+                List<String> names = this.tabOnlineNames();
+                names.add("all");
+                return completeFrom(names, current);
+            }
+            return new ArrayList<String>();
+        }
+
+        // ---- /pu bal | debug | questreset <玩家>
+        if ("bal".equals(sub) || "debug".equals(sub) || "questreset".equals(sub)) {
+            if (args.length == 2) {
+                return completeFrom(this.tabOnlineNames(), current);
+            }
+            return new ArrayList<String>();
+        }
+
+        return new ArrayList<String>();
+    }
+
+    /** 与 /pu 无参帮助同源的子命令候选（顺序无关紧要，返回前会排序）。 */
+    private List<String> tabSubcommands(CommandSender sender) {
+        List<String> out = new ArrayList<String>();
+        out.add("compound");
+        out.add("quest");
+        if (this.isDexEnabled()) {
+            out.add("dex");
+        }
+        if (this.isSalvageEnabled()) {
+            out.add("salvage");
+        }
+        if (this.isRerollEnabled()) {
+            out.add("reroll");
+        }
+        if (this.isStickerCraftEnabled()) {
+            out.add("craft");
+        }
+        out.add("history");
+        out.add("stats");
+        out.add("top");
+        out.add("bal");
+        if (sender.hasPermission("pokeutils.admin")) {
+            out.add("g");
+            out.add("take");
+            out.add("debug");
+            out.add("storage");
+            out.add("migrate");
+            out.add("questreset");
+            out.add("reload");
+        }
+        return out;
+    }
+
+    /** 在线玩家名（含自己）。刻意不查离线玩家 —— 见 onTabComplete 的说明。 */
+    private List<String> tabOnlineNames() {
+        List<String> out = new ArrayList<String>();
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            if (p != null && p.getName() != null) {
+                out.add(p.getName());
+            }
+        }
+        return out;
+    }
+
+    /** 配置里定义的粘剂键（改 config 后由 invalidateStickerTypes 失效，不会读到旧值）。 */
+    private List<String> tabStickerKeys() {
+        List<String> out = new ArrayList<String>();
+        for (StickerType sticker : this.getStickerTypes()) {
+            out.add(sticker.getKey());
+        }
+        return out;
+    }
+
+    /**
+     * 前缀过滤 + 去重 + 排序。
+     *
+     * <p>Bukkit 不会替插件过滤候选项 —— 不自己筛的话，敲 {@code /pu re} 会看到全部
+     * 二十多个子命令，补全反而变成噪音。</p>
+     */
+    private static List<String> completeFrom(List<String> all, String prefix) {
+        String head = prefix == null ? "" : prefix.toLowerCase(Locale.ROOT);
+        Set<String> picked = new java.util.TreeSet<String>(String.CASE_INSENSITIVE_ORDER);
+        for (String item : all) {
+            if (item == null) {
+                continue;
+            }
+            if (head.isEmpty() || item.toLowerCase(Locale.ROOT).startsWith(head)) {
+                picked.add(item);
+            }
+        }
+        return new ArrayList<String>(picked);
     }
 
     // ================================================================ 第四轮新增命令入口
@@ -2926,6 +3216,16 @@ public class PokeUtils extends JavaPlugin {
         if (amount <= 0) {
             sender.sendMessage("§b精灵信息 §f// §c数量必须大于 0！");
             return;
+        }
+        // 修复（新增防护）：数量原本只判 >0，没有上限。而 addSticker 是「读当前值 → 加 delta
+        // → 写回」的整数运算，`/pu g 玩家 PT 2000000000` 连敲两次就会溢出成负数，再被
+        // Math.max(0, ...) 夹回 0 —— 玩家的粘剂被一次「给予」清空，而控制台一切正常。
+        // 上限取得远高于任何正常用途（单次 100 万），超出直接截断并说明按多少执行，
+        // 免得管理员以为发的是自己敲的那个数。
+        if (amount > MAX_STICKER_AMOUNT) {
+            sender.sendMessage("§b精灵信息 §f// §e单次最多 " + MAX_STICKER_AMOUNT
+                    + " 个，已按 " + MAX_STICKER_AMOUNT + " 处理。");
+            amount = MAX_STICKER_AMOUNT;
         }
         // 修复：类型不再写死 PT / JL，改为核对配置里的粘剂列表。
         if (this.getStickerType(type) == null) {

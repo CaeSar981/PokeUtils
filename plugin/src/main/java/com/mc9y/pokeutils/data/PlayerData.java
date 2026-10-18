@@ -1385,7 +1385,7 @@ public class PlayerData {
         inv.setItem(49, button(Material.BARRIER, "§c返回合成界面",
                 "§b",
                 "§7 §k||§e 已收录: §f" + species.size() + " §e种精灵",
-                "§7 §k||§e 累计产出: §f" + totalDexAmount(p) + " §e次",
+                "§7 §k||§e 累计产出: §f" + totalDexAmount(all) + " §e次",
                 "§7 §k||§e 奖励档位: §f" + plugin.getDexRewards().size() + " §e个",
                 "§d"));
         inv.setItem(53, button(Material.ARROW, "§e下一页 §7(" + current + " / " + pages + ")"));
@@ -1417,10 +1417,20 @@ public class PlayerData {
         p.openInventory(inv);
     }
 
-    private int totalDexAmount(Player p) {
+    /**
+     * 图鉴累计产出次数。
+     *
+     * <p>直接拿上面已经查到的 {@code all} 求和 —— 原实现是又调了一次 {@code getDexAll}，
+     * 于是「打开图鉴」这个动作把同样一份全量行从库里拉了两遍（图鉴 300 种时是 600 行的
+     * 两次往返）。求和是纯内存操作，没有任何理由再查一次。</p>
+     */
+    private static int totalDexAmount(Map<String, Integer> all) {
         int total = 0;
-        for (Integer amount : PokeUtils.getInstance().getDexAll(p).values()) {
-            total += amount == null ? 0 : amount;
+        if (all == null) {
+            return 0;
+        }
+        for (Integer amount : all.values()) {
+            total += amount == null ? 0 : amount.intValue();
         }
         return total;
     }
