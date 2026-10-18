@@ -464,44 +464,54 @@ public class PlayerData {
         // ----------------------------------------------------------------
         //  位置说明：这一排原本是 6 格纯装饰的灰玻璃。放在这里而不是最下面一行，
         //  是为了不动外框、也不动既有的槽位断言 —— 新增入口全部是「原来什么都没画」的格子。
-        //  按钮始终渲染（即使对应功能被 config 关掉），点下去会提示「该功能已关闭」——
-        //  保持布局稳定比省一个格子更重要，玩家也不会因为开关变化而「找不到按钮」。
+        //
+        //  开关联动（本次新增）：功能在 config 里关掉时不再画图标，改填回灰玻璃。
+        //  原实现是「按钮始终渲染，点下去提示该功能已关闭」，但那等于把一格永久钉在界面上：
+        //  玩家反复点一个不存在的功能，运维也没法从界面看出哪些功能其实没开。
+        //  这里不直接跳过 setItem —— 槽 20~25 不在上面的 fgslots 铺底列表里，
+        //  留空会在界面中央出现一排黑洞，所以关闭时补一块同款灰玻璃。
         // ================================================================
-        String pickInfo = this.getInheritPicks() + " / "
-                + PokeUtils.getInstance().getInheritMaxPicks();
-        inv.setItem(20, button(Material.NETHER_STAR, "§b继承设置 §f(§e点击配置§f)",
-                "§b",
-                "§7 §k||§e 让产物继承父本的属性",
-                "§7 §k||§e 已选: §f" + pickInfo,
-                "§d"));
+        PokeUtils plugin = PokeUtils.getInstance();
+        String pickInfo = this.getInheritPicks() + " / " + plugin.getInheritMaxPicks();
+        featureEntry(inv, 20, plugin.isInheritEnabled(), fg,
+                button(Material.NETHER_STAR, "§b继承设置 §f(§e点击配置§f)",
+                        "§b",
+                        "§7 §k||§e 让产物继承父本的属性",
+                        "§7 §k||§e 已选: §f" + pickInfo,
+                        "§d"));
 
-        inv.setItem(21, button(Material.SLIME_BALL, "§b分解回收 §f(§e点击打开§f)",
-                "§b",
-                "§7 §k||§e 把多余的精灵换成粘剂与金币",
-                "§7 §k||§e 返还比例按精灵星级计算",
-                "§d"));
+        featureEntry(inv, 21, plugin.isSalvageEnabled(), fg,
+                button(Material.SLIME_BALL, "§b分解回收 §f(§e点击打开§f)",
+                        "§b",
+                        "§7 §k||§e 把多余的精灵换成粘剂与金币",
+                        "§7 §k||§e 返还比例按精灵星级计算",
+                        "§d"));
 
-        inv.setItem(22, button(Material.MAGMA_CREAM, "§b属性洗练 §f(§e点击打开§f)",
-                "§b",
-                "§7 §k||§e 重掷精灵的单项属性",
-                "§7 §k||§e 消耗金币与粘剂",
-                "§d"));
+        featureEntry(inv, 22, plugin.isRerollEnabled(), fg,
+                button(Material.MAGMA_CREAM, "§b属性洗练 §f(§e点击打开§f)",
+                        "§b",
+                        "§7 §k||§e 重掷精灵的单项属性",
+                        "§7 §k||§e 消耗金币与粘剂",
+                        "§d"));
 
-        inv.setItem(23, button(Material.DRAGONS_BREATH, "§b粘剂合成 §f(§e点击打开§f)",
-                "§b",
-                "§7 §k||§e 用低阶粘剂合成高阶粘剂",
-                "§d"));
+        featureEntry(inv, 23, plugin.isStickerCraftEnabled(), fg,
+                button(Material.DRAGONS_BREATH, "§b粘剂合成 §f(§e点击打开§f)",
+                        "§b",
+                        "§7 §k||§e 用低阶粘剂合成高阶粘剂",
+                        "§d"));
 
-        inv.setItem(24, button(Material.PAPER, "§b每日委托 §f(§e点击查看§f)",
-                "§b",
-                "§7 §k||§e 每天刷新的一组小目标",
-                "§7 §k||§e 完成后可领取金币与粘剂",
-                "§d"));
+        featureEntry(inv, 24, plugin.isQuestEnabled(), fg,
+                button(Material.PAPER, "§b每日委托 §f(§e点击查看§f)",
+                        "§b",
+                        "§7 §k||§e 每天刷新的一组小目标",
+                        "§7 §k||§e 完成后可领取金币与粘剂",
+                        "§d"));
 
-        inv.setItem(25, button(Material.BOOK_AND_QUILL, "§b合成图鉴 §f(§e点击查看§f)",
-                "§b",
-                "§7 §k||§e 记录你合成产出过的每一只精灵",
-                "§d"));
+        featureEntry(inv, 25, plugin.isDexEnabled(), fg,
+                button(Material.BOOK_AND_QUILL, "§b合成图鉴 §f(§e点击查看§f)",
+                        "§b",
+                        "§7 §k||§e 记录你合成产出过的每一只精灵",
+                        "§d"));
 
         int[] pzslots = new int[]{12, 14};
         for (int i : pzslots) {
@@ -943,6 +953,18 @@ public class PlayerData {
         meta.setDisplayName("§a");
         pane.setItemMeta(meta);
         return pane;
+    }
+
+    /**
+     * 功能入口按钮：功能开着就放图标，关着就把这一格填回装饰玻璃。
+     *
+     * <p>槽 20~25 不在 {@link #openGui} 的铺底列表里（那一排本来是装饰格，特意空出来给入口用），
+     * 所以「关闭时什么都不画」会在界面中央留下一排空洞。填同款灰玻璃既让图标消失，
+     * 又保持整排视觉完整 —— 点上去只会落到玻璃上，没有反应，也不会误开界面。</p>
+     */
+    private static void featureEntry(Inventory inv, int slot, boolean enabled,
+            ItemStack fallback, ItemStack icon) {
+        inv.setItem(slot, enabled ? icon : fallback);
     }
 
     private static ItemStack button(Material material, String name, String... lore) {

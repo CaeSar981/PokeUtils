@@ -1260,7 +1260,8 @@ SQLite 的公开方法都是 `synchronized`，MySQL 从连接池借连接。
 
 #### 35.5 测试
 
-新增 `V 组`（V0~V6，8 条断言），断言的是**时序契约**而不是玩法细节：
+新增 `V 组`（V0~V6，**7 条断言**；V3 / V5 是纯动作步骤不带断言），断言的是**时序契约**
+而不是玩法细节：
 
 - **V1**：`openQuestGui` 返回的那一帧**还停在主界面** —— 证明读库真的没占主线程；
 - **V2**：一两个 tick 后面板带着 3 条委托出现（数据确实来自后台那次读）；
@@ -1273,6 +1274,71 @@ SQLite 的公开方法都是 `synchronized`，MySQL 从连接池借连接。
 
 端到端基线 **741 → 749**（实测 749/749 全绿，MySQL 后端，132.5s，报告
 `plugins/PokeUtilsAutoTest/report-v-mysql-749of749.txt`）。
+
+### 36. 2026-10-18：功能关闭后入口图标不再显示
+
+#### 36.1 问题
+
+主界面槽 20~25 是第四轮那六个功能入口（继承 / 分解 / 洗练 / 粘剂合成 / 委托 / 图鉴）。
+原实现是**按钮始终渲染**：即使对应功能在 `config.yml` 里关掉，图标也照画，点下去只提示
+「该功能已关闭」。这样有两个后果 —— 玩家反复去点一个不存在的功能；运维也没法从界面上
+看出这台服到底开了哪几项。
+
+#### 36.2 做法
+
+`PlayerData` 新增一个极小的入口方法：
+
+```java
+private static void featureEntry(Inventory inv, int slot, boolean enabled,
+        ItemStack fallback, ItemStack icon) {
+    inv.setItem(slot, enabled ? icon : fallback);
+}
+```
+
+六处调用从 `inv.setItem(slot, button(...))` 改成
+`featureEntry(inv, slot, <开关>, fg, button(...))`。映射关系：
+
+| 配置键 | 槽位 | 判定方法 |
+| --- | --- | --- |
+| `Compound.inherit.enabled` | 20 | `isInheritEnabled()` |
+| `Compound.salvage.enabled` | 21 | `isSalvageEnabled()` |
+| `Compound.reroll.enabled` | 22 | `isRerollEnabled()` |
+| `Compound.sticker-craft.enabled` | 23 | `isStickerCraftEnabled()` |
+| `Compound.quest.enabled` | 24 | `isQuestEnabled()` |
+| `Compound.dex.enabled` | 25 | `isDexEnabled()` |
+
+点击侧**不需要改**：`openSubGuiIfEnabled` 本来就挡着，灰玻璃点上去不会有任何反应。
+
+#### 36.3 为什么关闭时填灰玻璃而不是留空
+
+槽 20~25 不在 `openGui` 的 `fgslots` 铺底列表里 —— 那一排原本是装饰格，特意空出来给入口用。
+所以「关闭时什么都不画」会在界面中央留下一排黑洞，看起来像渲染错误。填一块与外框同款的
+灰玻璃（`STAINED_GLASS_PANE` data 15、显示名 `§a`）既让图标真正消失，又保持整排视觉完整。
+
+作为对照，槽 40 的电脑盒子入口（`Compound.pc.enabled`）走的是「留空」路线 —— 那一格有铺底，
+留空不会露洞。两处做法不同是各自布局决定的，不是不一致。
+
+#### 36.4 为什么没加新配置项
+
+需求是「关掉功能就别显示图标」，这本身就是开关的语义，再加一个 `hide-disabled-icons`
+等于让人配两次。直接跟着六个 `enabled` 走，行为可预期，也少一个「代码字面量默认值
+必须与出厂 `config.yml` 一致」的维护点。
+
+#### 36.5 测试
+
+新增 `W 组`（7 条断言），验三条边界：
+
+- **W1**：关掉继承与委托后，槽 20 / 24 变成灰玻璃（`STAINED_GLASS_PANE data=15 name=§a`）；
+- **W2**：槽 21 / 22 / 23 / 25 的图标都还在 —— 防止「一个开关把整排清掉」；
+- **W3**：点被隐藏的那一格仍停在合成主界面（不会误开子界面）；
+- **W4**：恢复开关后槽 20 / 24 的图标回来；
+- **W5**：恢复后点槽 20 真能进「§8继承设置」，证明不是只画了个样子。
+
+选「继承 + 委托」做代表：前者在界面上带额外状态行（已选 N / M），后者走异步读库路径，
+两者被关掉时最容易顺手带出别的副作用。
+
+端到端基线 **749 → 756**（实测 756/756 全绿，MySQL 后端，144.4s，报告
+`plugins/PokeUtilsAutoTest/report-w-mysql-756of756.txt`）。
 
 ## 配置一览（第三轮新增键）
 
