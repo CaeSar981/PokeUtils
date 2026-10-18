@@ -161,11 +161,7 @@ Storage:
 > `https://github.com/CaeSar981/PokeUtils/releases/download/latest/PokeUtils-remake-latest.jar`
 > —— 每次 push 到 `main` 自动覆盖，指向当次构建。
 
-## 文档索引
+## 配置
 
-| 文档 | 内容 |
-| --- | --- |
-| [`docs/配置参考.md`](docs/配置参考.md) | 全部配置键按轮次汇总的默认值与说明、数据文件布局 |
-| [`docs/修复记录.md`](docs/修复记录.md) | 逐条修复记录：每个坑的现象、根因与改法。排查线上问题先从这份开始 |
-| [`docs/开发说明.md`](docs/开发说明.md) | 目录结构与类的职责、编译桩原理、与依赖插件的接口核对 |
-| [`config.yml`](plugin/src/main/resources/config.yml) | 全部配置键的默认值与原位注释（最权威） |
+全部配置键的默认值、逐项说明与原位注释都在
+[`plugin/src/main/resources/config.yml`](plugin/src/main/resources/config.yml)，以那份为准。
