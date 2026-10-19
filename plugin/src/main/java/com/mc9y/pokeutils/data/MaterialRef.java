@@ -28,21 +28,47 @@ public final class MaterialRef {
     private final int box;
     /** 队伍来源时是队伍下标（0~5）；电脑来源时是箱子内的槽位下标。 */
     private final int slot;
+    /**
+     * 选中这只材料时它自己的 UUID。
+     *
+     * <p>坐标只说明「在哪一格」，不说明「是哪一只」。玩家选完材料、还没点确认的这段时间里，
+     * 那一格的内容可能被换掉（自己拖队伍、从盒子取精灵补空位、其他插件把打工的精灵还回队伍），
+     * 而坐标还指在原处 —— 此时按坐标消耗，吃掉的就不是玩家选的那只。</p>
+     *
+     * <p>{@code null} 表示无从校验（旧会话、或由不关心身份的调用方构造），此时一律放行。</p>
+     */
+    private final String uuid;
 
-    private MaterialRef(Source source, int box, int slot) {
+    private MaterialRef(Source source, int box, int slot, String uuid) {
         this.source = source;
         this.box = box;
         this.slot = slot;
+        this.uuid = uuid;
     }
 
     /** 队伍里的第 {@code slot} 格。 */
     public static MaterialRef ofParty(int slot) {
-        return new MaterialRef(Source.PARTY, -1, slot);
+        return new MaterialRef(Source.PARTY, -1, slot, null);
+    }
+
+    /** 队伍里的第 {@code slot} 格，并记下选中时那只精灵的 UUID。 */
+    public static MaterialRef ofParty(int slot, String uuid) {
+        return new MaterialRef(Source.PARTY, -1, slot, uuid);
     }
 
     /** 电脑盒子里第 {@code box} 箱的第 {@code slot} 格。 */
     public static MaterialRef ofPc(int box, int slot) {
-        return new MaterialRef(Source.PC, box, slot);
+        return new MaterialRef(Source.PC, box, slot, null);
+    }
+
+    /** 电脑盒子里第 {@code box} 箱的第 {@code slot} 格，并记下选中时那只精灵的 UUID。 */
+    public static MaterialRef ofPc(int box, int slot, String uuid) {
+        return new MaterialRef(Source.PC, box, slot, uuid);
+    }
+
+    /** 选中时那只精灵的 UUID；{@code null} 表示未记录、不参与校验。 */
+    public String getUuid() {
+        return this.uuid;
     }
 
     public Source getSource() {
@@ -98,6 +124,13 @@ public final class MaterialRef {
         return a.equals(b);
     }
 
+    /**
+     * 相等性<b>只看坐标，不看 {@link #uuid}</b>，这是刻意的。
+     *
+     * <p>本方法被 {@link #same} 用于「该精灵已在其他槽位选择」的重复判定 ——
+     * 判的是「同一格」。如果把 uuid 算进来，那么「同一格在两次操作之间换了精灵」
+     * 就会被当成两个不同的材料引用，重复判定失效，玩家可以把同一格选两次。</p>
+     */
     @Override
     public boolean equals(Object o) {
         if (this == o) {

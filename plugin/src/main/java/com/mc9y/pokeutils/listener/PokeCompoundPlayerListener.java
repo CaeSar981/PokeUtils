@@ -243,6 +243,27 @@ public class PokeCompoundPlayerListener implements Listener {
                                             return;
                                         }
 
+                                        // 新增防护：格子里「有精灵」不等于「还是当初那只」。
+                                        // 玩家选完材料、还没点确认的这段时间里，那一格的内容可能被换掉
+                                        // （自己拖队伍、从盒子取精灵补上空位、其他插件把打工的精灵还回队伍），
+                                        // 而坐标仍指在原处。下面的消耗是按坐标 set(null) 的，
+                                        // 不校验身份就会把玩家没选的那只当材料吃掉。
+                                        // 比对的是选中时记进 MaterialRef 的 UUID（见该类 uuid 字段说明）。
+                                        String replaced = identityChanged(pd.getMaterial1(), pokemon1)
+                                                ? "第一格" : null;
+                                        if (replaced == null && need >= 2
+                                                && identityChanged(pd.getMaterial2(), pokemon2)) {
+                                            replaced = "第二格";
+                                        }
+                                        if (replaced != null) {
+                                            pd.setMaterial1(null);
+                                            pd.setMaterial2(null);
+                                            p.sendMessage("§3精灵合成 §f|| §c" + replaced
+                                                    + "的精灵已被替换, 请重新选择材料!");
+                                            p.closeInventory();
+                                            return;
+                                        }
+
                                         int star1 = PokeUtils.getInstance().getPokemonStar(pokemon1.getSpecies().name());
                                         int star2 = PokeUtils.getInstance().getPokemonStar(pokemon2.getSpecies().name());
                                         // 修复：价格原来写死在这里（{0,1000,10000,30000,100000,400000,1000000}），
@@ -636,7 +657,9 @@ public class PokeCompoundPlayerListener implements Listener {
                         // 新增（A1）：材料改成引用对象。重复判定用 MaterialRef#same ——
                         // 原来的 `pd.getSlot1() == pokeSlot` 只能比队伍下标，
                         // 而「队伍 3」与「箱子 2 的第 3 格」在旧写法下会被判成同一只。
-                        MaterialRef ref = MaterialRef.ofParty(pokeSlot);
+                        // 新增：连同 UUID 一起记进引用 —— 坐标只说明「在哪一格」，
+                        // 合成前还要确认那一格里仍然是同一只（见 MaterialRef#uuid 的说明）。
+                        MaterialRef ref = MaterialRef.ofParty(pokeSlot, uuidOfParty(p, pokeSlot));
                         if (MaterialRef.same(ref, pd.getMaterial1()) || MaterialRef.same(ref, pd.getMaterial2())) {
                             p.sendMessage("§3精灵合成 §f|| §c该精灵已在其他槽位选择！");
                             return;
@@ -1306,19 +1329,61 @@ public class PokeCompoundPlayerListener implements Listener {
     }
 
     /**
+     * 这一格里的精灵是否已经<b>不是</b>选中时记下的那一只。
+     *
+     * <p>判定只看 UUID，不看种类 —— 同种类的两只精灵互换位置同样属于「被换掉」，
+     * 因为消耗掉的具体是哪一只（等级、个体值、努力值都不同）对玩家是有区别的。</p>
+     *
+     * <p>任何一边缺信息都返回 {@code false}（视为没变）：引用为 null 表示这一格没选，
+     * 记录为 null 表示旧会话或由不关心身份的调用方构造。宁可放行，也不要因为
+     * 拿不到 UUID 就让玩家合不了成 —— 这个防护针对的是「有人换了精灵」，
+     * 而不是「无法证明没换」。</p>
+     */
+    private static boolean identityChanged(MaterialRef ref, Pokemon current) {
+        if (ref == null || current == null) {
+            return false;
+        }
+        String expected = ref.getUuid();
+        if (expected == null) {
+            return false;
+        }
+        String actual = uuidOf(current);
+        return actual != null && !expected.equalsIgnoreCase(actual);
+    }
+
+    /** 精灵 UUID 的字符串形式；取不到返回 null。 */
+    private static String uuidOf(Pokemon pokemon) {
+        if (pokemon == null) {
+            return null;
+        }
+        Object uuid = pokemon.getUUID();
+        return uuid == null ? null : uuid.toString();
+    }
+
+    /** 队伍某格精灵的 UUID；该格为空或存储未就绪时返回 null。 */
+    private static String uuidOfParty(Player p, int slot) {
+        // 走 MaterialAccess 而不是直接取 PlayerPartyStorage —— 本类其余地方
+        // 已经不直连队伍存储了，这里也保持一致（队伍与盒子的区别只在一处知道）。
+        return uuidOf(MaterialAccess.resolve(p, MaterialRef.ofParty(slot)));
+    }
+
+    /**
      * 新增（A1）：把电脑盒子里的一只精灵选为合成材料。
      *
      * <p>三道判定与队伍那条路径<b>共用同一套规则</b>（重复、队伍保底），
      * 差别只在「这只精灵在哪」以及「消耗它会不会让队伍变少」。</p>
      */
     private static void pickPcMaterial(Player p, PlayerData pd, int pcSlot) {
-        MaterialRef ref = MaterialRef.ofPc(pd.getPcBox(), pcSlot);
-        Pokemon pokemon = MaterialAccess.resolve(p, ref);
-        if (pokemon == null) {
+        // 先按坐标建一个「探测引用」拿到当前那只精灵，再带着它的 UUID 重建正式引用 ——
+        // 坐标引用本身不知道格子里是哪一只（见 MaterialRef#uuid）。
+        MaterialRef probe = MaterialRef.ofPc(pd.getPcBox(), pcSlot);
+        Pokemon resolved = MaterialAccess.resolve(p, probe);
+        if (resolved == null) {
             // 点到了空格子。界面上本该只有灰玻璃或精灵，走到这里说明箱子内容在
             // 界面开着的时候变了 —— 静默忽略，不提示也不改任何东西。
             return;
         }
+        MaterialRef ref = MaterialRef.ofPc(pd.getPcBox(), pcSlot, uuidOf(resolved));
         if (MaterialRef.same(ref, pd.getMaterial1()) || MaterialRef.same(ref, pd.getMaterial2())) {
             p.sendMessage("§3精灵合成 §f|| §c该精灵已在其他槽位选择！");
             return;

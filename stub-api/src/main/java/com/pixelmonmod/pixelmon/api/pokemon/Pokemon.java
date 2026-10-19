@@ -31,6 +31,16 @@ public class Pokemon {
         return null;
     }
 
+    /**
+     * 精灵唯一标识。
+     *
+     * <p>真机签名（Pixelmon 1.12.2-8.4.2，javap 确认）：{@code public java.util.UUID getUUID()}。
+     * 用来判断「某一格里的还是不是当初选中的那一只」—— 坐标只说明位置，不说明身份。</p>
+     */
+    public java.util.UUID getUUID() {
+        return null;
+    }
+
     public boolean isEgg() {
         return false;
     }
