@@ -142,6 +142,9 @@ echo "    $(find "$OUT/classes" -name '*.class' | wc -l) 个 class"
 echo "==> 复制资源"
 cp "$RES/plugin.yml" "$OUT/classes/"
 cp "$RES/config.yml" "$OUT/classes/"
+# messages.yml 必须一起打进去：它既是首次运行时释放给服主的那一份，
+# 也是 Msg 在「服主删了某个 key」时的兜底。漏了它所有提示都会变成 <missing:...>。
+cp "$RES/messages.yml" "$OUT/classes/"
 
 echo "==> 打包"
 mkdir -p "$(dirname "$DIST")"

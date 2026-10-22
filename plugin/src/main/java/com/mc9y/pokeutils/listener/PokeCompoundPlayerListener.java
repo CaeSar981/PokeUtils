@@ -17,6 +17,7 @@ import com.mc9y.pokeutils.data.StickerRecipe;
 import com.mc9y.pokeutils.data.Storage;
 import com.mc9y.pokeutils.data.StickerType;
 import com.mc9y.pokeutils.data.YSData;
+import com.mc9y.pokeutils.util.Msg;
 import com.pixelmonmod.pixelmon.Pixelmon;
 import com.pixelmonmod.pixelmon.api.pokemon.Pokemon;
 import com.pixelmonmod.pixelmon.enums.EnumSpecies;
@@ -115,7 +116,7 @@ public class PokeCompoundPlayerListener implements Listener {
             enabled = plugin.isDexEnabled();
         }
         if (!enabled) {
-            p.sendMessage("§3精灵合成 §f|| §c" + feature + "功能已关闭!");
+            p.sendMessage(Msg.get("compound.feature-disabled", "feature", feature));
         }
         return enabled;
     }
@@ -189,7 +190,7 @@ public class PokeCompoundPlayerListener implements Listener {
                                 // 同步执行的 —— 原实现只靠「槽位上的精灵已被清空」间接拦住，
                                 // 那属于碰巧。这里用显式标志，下一 tick 无条件解除。
                                 if (pd.isProcessing()) {
-                                    p.sendMessage("§3精灵合成 §f|| §e上一次操作还在处理中, 请稍候！");
+                                    p.sendMessage(Msg.get("compound.processing"));
                                     break;
                                 }
                                 pd.setProcessing(true);
@@ -223,9 +224,10 @@ public class PokeCompoundPlayerListener implements Listener {
                                     // 队伍根本不会变少，这条约束无从谈起（材料全在盒子里、
                                     // 队伍空着，是完全合法的用法）。
                                     if (partyConsumed > 0 && amount - partyConsumed < 1) {
-                                        p.sendMessage("§3精灵合成 §f|| §c" + (partyConsumed == need
-                                                ? "背包最少需要装备" + PokeUtils.numeral(need + 1) + "只精灵!"
-                                                : "队伍里的精灵不足以支撑本次合成, 至少要保留一只!"));
+                                        p.sendMessage(partyConsumed == need
+                                                ? Msg.get("compound.party-need-equip",
+                                                        "need", PokeUtils.numeral(need + 1))
+                                                : Msg.get("compound.party-keep-one"));
                                     } else {
                                         // 修复（新增防护）：先把两只精灵取出来判空。
                                         // 界面开着的时候，所选槽位上的精灵可能已经被移走 —— 其他插件/指令操作了队伍，
@@ -238,7 +240,7 @@ public class PokeCompoundPlayerListener implements Listener {
                                         if (pokemon1 == null || pokemon2 == null) {
                                             pd.setMaterial1(null);
                                             pd.setMaterial2(null);
-                                            p.sendMessage("§3精灵合成 §f|| §c所选槽位上的精灵已不存在, 请重新选择!");
+                                            p.sendMessage(Msg.get("compound.material-gone"));
                                             p.closeInventory();
                                             return;
                                         }
@@ -258,8 +260,7 @@ public class PokeCompoundPlayerListener implements Listener {
                                         if (replaced != null) {
                                             pd.setMaterial1(null);
                                             pd.setMaterial2(null);
-                                            p.sendMessage("§3精灵合成 §f|| §c" + replaced
-                                                    + "的精灵已被替换, 请重新选择材料!");
+                                            p.sendMessage(Msg.get("compound.material-replaced", "slot", replaced));
                                             p.closeInventory();
                                             return;
                                         }
@@ -276,7 +277,7 @@ public class PokeCompoundPlayerListener implements Listener {
                                         // 于是两只「未收录」精灵会以 price[0] = 0（不花金币）+ jl = 80% 成交 ——
                                         // 等于免费换一只一星精灵。1 星是星级系统的最低合法档位，0 一律按「未收录」拒绝。
                                         if (star1 < 1 || star2 < 1) {
-                                            p.sendMessage("§3精灵合成 §f|| §c所选精灵未被星级系统收录, 无法参与合成!");
+                                            p.sendMessage(Msg.get("compound.not-in-star-system"));
                                             return;
                                         }
 
@@ -300,7 +301,7 @@ public class PokeCompoundPlayerListener implements Listener {
                                                 // 冷却期间直接返回，不产生任何消耗。
                                                 // 注意「判定通过才记时间」—— 否则冷却期间的连点会不断给冷却续期。
                                                 if (!PokeUtils.getInstance().tryUseCompoundCooldown(p)) {
-                                                    p.sendMessage("§3精灵合成 §f|| §e操作太快了, 请稍后再试！");
+                                                    p.sendMessage(Msg.get("compound.too-fast"));
                                                     return;
                                                 }
 
@@ -311,8 +312,7 @@ public class PokeCompoundPlayerListener implements Listener {
                                                 int confirmMin = PokeUtils.getInstance().getConfirmMinStar();
                                                 if (confirmMin > 0 && star1 >= confirmMin && !pd.isConfirmed()) {
                                                     pd.setConfirmed(true);
-                                                    p.sendMessage("§3精灵合成 §f|| §c本次将消耗两只 " + star1
-                                                            + " 星精灵, 请再点击一次「确认合成」以确认操作！");
+                                                    p.sendMessage(Msg.get("compound.confirm-consume", "star", star1));
                                                     pd.openGui(p);
                                                     return;
                                                 }
@@ -331,8 +331,7 @@ public class PokeCompoundPlayerListener implements Listener {
                                                 List<String> starPMs =
                                                         PokeUtils.getInstance().getPreviewPool(star1 + 1);
                                                 if (starPMs == null || starPMs.isEmpty()) {
-                                                    p.sendMessage("§3精灵合成 §f|| §c目标 " + (star1 + 1)
-                                                            + " 星档位的产出池为空, 已中止合成, 未扣除任何物品!");
+                                                    p.sendMessage(Msg.get("compound.empty-pool", "star", star1 + 1));
                                                     return;
                                                 }
 
@@ -341,7 +340,7 @@ public class PokeCompoundPlayerListener implements Listener {
                                                 // 而且这一行排在扣金币之后 —— 玩家会先被扣钱再看到报错。
                                                 YSData ysd = PokeUtils.getInstance().ysdatas.get(p.getName());
                                                 if (ysd == null) {
-                                                    p.sendMessage("§3精灵合成 §f|| §c粘剂数据尚未加载, 请重新进服后再试!");
+                                                    p.sendMessage(Msg.get("common.sticker-not-loaded"));
                                                     return;
                                                 }
 
@@ -368,7 +367,7 @@ public class PokeCompoundPlayerListener implements Listener {
                                                 // 修复（新增防护）：Vault 装上了但没有可用的经济插件时，
                                                 // economy 是 null，原实现直接 economy.getBalance(...) 会抛空指针。
                                                 if (!useVoucher && PokeUtils.getInstance().economy == null) {
-                                                    p.sendMessage("§3精灵合成 §f|| §c服务器经济服务不可用, 暂时无法合成!");
+                                                    p.sendMessage(Msg.get("compound.economy-unavailable"));
                                                     return;
                                                 }
 
@@ -410,8 +409,7 @@ public class PokeCompoundPlayerListener implements Listener {
                                                     int randomJL = (int) (1.0 + Math.random() * 100.0);
                                                     p.closeInventory();
                                                     if (pity) {
-                                                        p.sendMessage("§3精灵合成 §f|| §e已连续失败 §f" + streak
-                                                                + " §e次, 本次触发保底, 必定成功！");
+                                                        p.sendMessage(Msg.get("compound.pity-triggered", "streak", streak));
                                                     }
                                                     if (pity || randomJL <= pd.getSumJL()) {
                                                         ysd.setFailStreak(0);
@@ -438,7 +436,8 @@ public class PokeCompoundPlayerListener implements Listener {
                                                         // 引用：无论材料来自队伍还是电脑盒子，摘除之后引用依然有效。
                                                         String inheritDetail = applyInheritanceTo(pd, pokemon, pokemon1, pokemon2);
                                                         PlayerStorageUtil.givePlayerPokemon(p, pokemon);
-                                                        p.sendMessage("§3精灵合成 §f|| §a成功合成一只 " + PokeUtils.getInstance().getStarDisplay(star1 + 1) + " §a, 精灵已发放至精灵槽！");
+                                                        p.sendMessage(Msg.get("compound.success",
+                                                                "star", PokeUtils.getInstance().getStarDisplay(star1 + 1)));
                                                         // 新增（玩家体验）：成功音效 + 一条屏幕 Title。
                                                         // 原插件从点开界面到拿到精灵全程没有任何声音或特效反馈。
                                                         PokeUtils.getInstance().playFeedback(p, "success");
@@ -490,13 +489,14 @@ public class PokeCompoundPlayerListener implements Listener {
                                                             }
                                                         }
 
-                                                        StringBuilder failMsg = new StringBuilder("§3精灵合成 §f|| §c本次合成精灵失败");
+                                                        StringBuilder failMsg = new StringBuilder(Msg.get("compound.fail-base"));
                                                         if (moneyRefund > 0) {
-                                                            failMsg.append(", 补偿合成所耗金币的").append(refund).append("%");
+                                                            failMsg.append(Msg.get("compound.fail-money", "percent", refund));
                                                         }
                                                         if (stickerRefund > 0) {
-                                                            failMsg.append(", 并返还 ").append(stickerRefund)
-                                                                    .append(" 个").append(refundSticker.getDisplay());
+                                                            failMsg.append(Msg.get("compound.fail-sticker",
+                                                                    "amount", stickerRefund,
+                                                                    "sticker", refundSticker.getDisplay()));
                                                         }
                                                         // 新增（经济）：用券失败时把券退还。
                                                         // 没有这一条时，用券合成的失败补偿是「什么都不返」——
@@ -519,7 +519,7 @@ public class PokeCompoundPlayerListener implements Listener {
                                                         // 这种「倾家荡产式失败」正是玩家算完账之后干脆不去合成的头号原因。
                                                         boolean protect = PokeUtils.getInstance().isStickerProtect(pd.getYS());
                                                         if (protect) {
-                                                            p.sendMessage("§3精灵合成 §f|| §e保护符生效, 两只材料精灵已保留！");
+                                                            p.sendMessage(Msg.get("compound.protect-saved"));
                                                         }
                                                         // 修复：此处原为 if (star1 == 6)，但它被外层 if (star1 < 6) 挡着，
                                                         // star1 最大只能是 5，分支永远不可达 —— config.yml 承诺的
@@ -536,7 +536,7 @@ public class PokeCompoundPlayerListener implements Listener {
                                                                     MaterialAccess.consume(p, pd.getMaterial2());
                                                                 }
 
-                                                                p.sendMessage("§3精灵合成 §f|| §e来自众神的祝福, 保留住了一只精灵！");
+                                                                p.sendMessage(Msg.get("compound.god-saved"));
                                                             } else {
                                                                 MaterialAccess.consume(p, pd.getMaterial1());
                                                                 if (need >= 2) {
@@ -593,17 +593,17 @@ public class PokeCompoundPlayerListener implements Listener {
                                                                 money, moneyRefund, detail.toString());
                                                     }
                                                 } else {
-                                                    p.sendMessage("§3精灵合成 §f|| §c你没有足够的金币！");
+                                                    p.sendMessage(Msg.get("common.lack-money"));
                                                 }
                                             } else {
-                                                p.sendMessage("§3精灵合成 §f|| §c精灵星级不能超过六星！");
+                                                p.sendMessage(Msg.get("compound.over-six-star"));
                                             }
                                         } else {
-                                            p.sendMessage("§3精灵合成 §f|| §c两只精灵星级不同");
+                                            p.sendMessage(Msg.get("compound.star-mismatch"));
                                         }
                                     }
                                 } else {
-                                    p.sendMessage("§3精灵合成 §f|| §c未选择齐精灵/合成粘剂");
+                                    p.sendMessage(Msg.get("compound.not-selected"));
                                 }
                             }
                     }
@@ -661,7 +661,7 @@ public class PokeCompoundPlayerListener implements Listener {
                         // 合成前还要确认那一格里仍然是同一只（见 MaterialRef#uuid 的说明）。
                         MaterialRef ref = MaterialRef.ofParty(pokeSlot, uuidOfParty(p, pokeSlot));
                         if (MaterialRef.same(ref, pd.getMaterial1()) || MaterialRef.same(ref, pd.getMaterial2())) {
-                            p.sendMessage("§3精灵合成 §f|| §c该精灵已在其他槽位选择！");
+                            p.sendMessage(Msg.get("compound.already-selected"));
                             return;
                         }
 
@@ -681,7 +681,7 @@ public class PokeCompoundPlayerListener implements Listener {
                             PokeUtils.getInstance().playFeedback(p, "select");
                             p.closeInventory();
                         } else {
-                            p.sendMessage("§3精灵合成 §f|| §c最少必须有一只精灵！");
+                            p.sendMessage(Msg.get("compound.need-one-pokemon"));
                         }
                     }
                 }
@@ -737,7 +737,7 @@ public class PokeCompoundPlayerListener implements Listener {
                             PokeUtils.getInstance().playFeedback(p, "select");
                             p.closeInventory();
                         } else {
-                            p.sendMessage("§3精灵合成 §f|| §c你没有足够的" + sticker.getInsufficient());
+                            p.sendMessage(Msg.get("common.lack-sticker", "sticker", sticker.getInsufficient()));
                         }
                     }
                 }
@@ -786,7 +786,7 @@ public class PokeCompoundPlayerListener implements Listener {
                                 || (slot == 12 && !pd.isInheritAbility())
                                 || (slot == 14 && !pd.isInheritIv());
                         if (turningOn && pd.getInheritPicks() >= max) {
-                            p.sendMessage("§3精灵合成 §f|| §c最多只能同时继承 " + max + " 项, 请先取消其它项!");
+                            p.sendMessage(Msg.get("compound.inherit-limit", "max", max));
                         } else {
                             if (slot == 10) {
                                 pd.toggleInheritNature();
@@ -898,9 +898,9 @@ public class PokeCompoundPlayerListener implements Listener {
                         int questSlot = slot - 10;
                         QuestData quest = findQuest(PokeUtils.getInstance().getQuestBoard(p), questSlot);
                         if (quest == null) {
-                            p.sendMessage("§3精灵合成 §f|| §c该委托不存在!");
+                            p.sendMessage(Msg.get("quest.not-exist"));
                         } else if (quest.isClaimed()) {
-                            p.sendMessage("§3精灵合成 §f|| §c这条委托已经领取过了!");
+                            p.sendMessage(Msg.get("quest.claimed"));
                         } else if (QuestType.SUBMIT.equals(quest.getType()) && !quest.isComplete()) {
                             // 交付类：先让玩家选一只精灵，而不是直接发奖。
                             pd.setPendingQuestSlot(questSlot);
@@ -1186,9 +1186,9 @@ public class PokeCompoundPlayerListener implements Listener {
         // 每个 OP 每次进服都会收到，直到重启修好为止，这是刻意的。
         String warning = plugin.getStorageWarning();
         if (warning != null && p.isOp()) {
-            p.sendMessage("§c[PokeUtils] 存储没有按预期工作：");
-            p.sendMessage("§c  " + warning);
-            p.sendMessage("§7  用 §f/pu storage §7查看当前状态；在此之前不要做重要的发放或扣减。");
+            p.sendMessage(Msg.get("storage.warn-header"));
+            p.sendMessage(Msg.get("storage.warn-line", "warning", warning));
+            p.sendMessage(Msg.get("storage.warn-hint"));
         }
     }
 
@@ -1385,12 +1385,12 @@ public class PokeCompoundPlayerListener implements Listener {
         }
         MaterialRef ref = MaterialRef.ofPc(pd.getPcBox(), pcSlot, uuidOf(resolved));
         if (MaterialRef.same(ref, pd.getMaterial1()) || MaterialRef.same(ref, pd.getMaterial2())) {
-            p.sendMessage("§3精灵合成 §f|| §c该精灵已在其他槽位选择！");
+            p.sendMessage(Msg.get("compound.already-selected"));
             return;
         }
         // newFromParty = false：从盒子取料不会让队伍变少。
         if (!partyKeepsOne(p, pd, false)) {
-            p.sendMessage("§3精灵合成 §f|| §c最少必须有一只精灵！");
+            p.sendMessage(Msg.get("compound.need-one-pokemon"));
             return;
         }
         if (pd.getPcTargetSlot() == 2) {

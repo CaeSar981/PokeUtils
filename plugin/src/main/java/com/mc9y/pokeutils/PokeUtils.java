@@ -19,6 +19,7 @@ import com.mc9y.pokeutils.data.StickerType;
 import com.mc9y.pokeutils.data.VoucherType;
 import com.mc9y.pokeutils.data.YSData;
 import com.mc9y.pokeutils.listener.PokeCompoundPlayerListener;
+import com.mc9y.pokeutils.util.Msg;
 import com.pixelmonmod.pixelmon.Pixelmon;
 import com.pixelmonmod.pixelmon.api.pokemon.Pokemon;
 import com.pixelmonmod.pixelmon.storage.PlayerPartyStorage;
@@ -1058,7 +1059,7 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
                 for (ItemStack drop : leftover.values()) {
                     p.getWorld().dropItemNaturally(p.getLocation(), drop);
                 }
-                p.sendMessage("§3精灵合成 §f|| §e背包已满, 合成券已掉落在你脚下。");
+                p.sendMessage(Msg.get("compound.voucher-dropped"));
             }
             return amount;
         } catch (Throwable t) {
@@ -1920,7 +1921,7 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
         PlayerPartyStorage pps = Pixelmon.storageManager.getParty(p.getUniqueId());
         Pokemon pokemon = pps == null ? null : pps.get(partySlot);
         if (pokemon == null) {
-            p.sendMessage("§3精灵合成 §f|| §c所选精灵已不存在!");
+            p.sendMessage(Msg.get("common.pokemon-gone"));
             return false;
         }
         QuestData target = null;
@@ -1931,17 +1932,17 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
             }
         }
         if (target == null || !QuestType.SUBMIT.equals(target.getType())) {
-            p.sendMessage("§3精灵合成 §f|| §c该委托不存在或不是交付类委托!");
+            p.sendMessage(Msg.get("quest.not-delivery-type"));
             return false;
         }
         if (target.isClaimed()) {
-            p.sendMessage("§3精灵合成 §f|| §c这条委托已经领取过了!");
+            p.sendMessage(Msg.get("quest.claimed"));
             return false;
         }
         int star = this.getPokemonStar(pokemon.getSpecies().name());
         if (star < target.getStar()) {
-            p.sendMessage("§3精灵合成 §f|| §c这条委托需要 " + starName(target.getStar())
-                    + " 及以上的精灵, 你选的是 " + starName(star) + "!");
+            p.sendMessage(Msg.get("quest.need-star",
+                    "required", starName(target.getStar()), "actual", starName(star)));
             return false;
         }
 
@@ -1954,7 +1955,7 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
         }
         this.grantQuestReward(p);
         this.markClaimed(p, target);
-        p.sendMessage("§3精灵合成 §f|| §a已交付 " + starName(star) + " 精灵, 委托完成并领取奖励!");
+        p.sendMessage(Msg.get("quest.delivered", "star", starName(star)));
         this.addQuestProgress(p, QuestType.SUBMIT, 0);
         return true;
     }
@@ -1973,26 +1974,26 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
             }
         }
         if (target == null) {
-            p.sendMessage("§3精灵合成 §f|| §c该委托不存在!");
+            p.sendMessage(Msg.get("quest.not-exist"));
             return false;
         }
         if (QuestType.SUBMIT.equals(target.getType())) {
             // 交付类不能空手领 —— 否则「交付一只四星精灵」可以靠点一下按钮白拿。
-            p.sendMessage("§3精灵合成 §f|| §c这条是交付类委托, 请在界面上选择要交付的精灵!");
+            p.sendMessage(Msg.get("quest.submit-in-gui"));
             return false;
         }
         if (target.isClaimed()) {
-            p.sendMessage("§3精灵合成 §f|| §c这条委托已经领取过了!");
+            p.sendMessage(Msg.get("quest.claimed"));
             return false;
         }
         if (!target.isComplete()) {
-            p.sendMessage("§3精灵合成 §f|| §c这条委托还没完成 (§f"
-                    + target.getProgress() + "§c/§f" + target.getTarget() + "§c)!");
+            p.sendMessage(Msg.get("quest.not-finished",
+                    "progress", target.getProgress(), "target", target.getTarget()));
             return false;
         }
         this.grantQuestReward(p);
         this.markClaimed(p, target);
-        p.sendMessage("§3精灵合成 §f|| §a委托奖励已领取!");
+        p.sendMessage(Msg.get("quest.reward-claimed"));
         return true;
     }
 
@@ -2024,19 +2025,18 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
         VoucherType voucher = this.findVoucherByKey(voucherKey);
         int voucherGiven = voucher == null ? 0 : this.grantVoucher(p, voucherKey, voucherAmount);
 
-        StringBuilder msg = new StringBuilder("§3精灵合成 §f|| §a获得委托奖励: ");
+        StringBuilder msg = new StringBuilder(Msg.get("quest.reward-got"));
         boolean any = false;
         if (money > 0) {
-            msg.append("§f").append(money).append(" §a金币");
+            msg.append(Msg.get("reward.money", "amount", money));
             any = true;
         }
         if (sticker != null && stickerAmount > 0) {
-            msg.append(any ? " §a+ " : "").append(stickerAmount).append(" 个").append(sticker.getDisplay());
+            msg.append(Msg.get("reward.sticker", "amount", stickerAmount, "name", sticker.getDisplay()));
             any = true;
         }
         if (voucherGiven > 0) {
-            msg.append(any ? " §a+ " : "").append("§f").append(voucherGiven)
-                    .append(" 张").append(voucher.getDisplay());
+            msg.append(Msg.get("reward.voucher", "amount", voucherGiven, "name", voucher.getDisplay()));
         }
         p.sendMessage(msg.toString());
     }
@@ -2149,19 +2149,18 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
      */
     public boolean claimDexMilestone(Player p, int milestone) {
         if (this.storage == null) {
-            p.sendMessage("§3精灵合成 §f|| §c存储尚未就绪, 无法领取!");
+            p.sendMessage(Msg.get("common.storage-not-ready"));
             return false;
         }
         int have = this.getDexSpeciesCount(p);
         if (have < milestone) {
-            p.sendMessage("§3精灵合成 §f|| §c图鉴还差 §f" + (milestone - have)
-                    + " §c种精灵才能领取这个奖励!");
+            p.sendMessage(Msg.get("dex.lack", "left", milestone - have));
             return false;
         }
         // 判重交给数据库主键：玩家连点两下时两次调用在同一 tick 内依次执行，
         // 「先查后写」会被绕过，INSERT OR IGNORE 不会。
         if (!this.storage.dexClaim(p.getUniqueId(), p.getName(), milestone)) {
-            p.sendMessage("§3精灵合成 §f|| §c这个图鉴奖励已经领取过了!");
+            p.sendMessage(Msg.get("dex.claimed"));
             return false;
         }
         for (DexReward reward : this.getDexRewards()) {
@@ -2178,14 +2177,14 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
                     ysd.deposit(reward.sticker, reward.stickerAmount);
                 }
             }
-            StringBuilder msg = new StringBuilder("§3精灵合成 §f|| §a图鉴奖励已领取: ");
+            StringBuilder msg = new StringBuilder(Msg.get("dex.reward-got"));
             if (reward.money > 0) {
-                msg.append("§f").append(reward.money).append(" §a金币");
+                msg.append(Msg.get("reward.money", "amount", reward.money));
             }
             boolean any = reward.money > 0;
             if (sticker != null && reward.stickerAmount > 0) {
-                msg.append(any ? " §a+ " : "")
-                        .append(reward.stickerAmount).append(" 个").append(sticker.getDisplay());
+                msg.append(Msg.get("reward.sticker",
+                        "amount", reward.stickerAmount, "name", sticker.getDisplay()));
                 any = true;
             }
             // 新增：图鉴里程碑也发券（Compound.reward-voucher.dex，留空 = 不发）。
@@ -2195,8 +2194,7 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
             VoucherType voucher = this.findVoucherByKey(voucherKey);
             int voucherGiven = voucher == null ? 0 : this.grantVoucher(p, voucherKey, voucherAmount);
             if (voucherGiven > 0) {
-                msg.append(any ? " §a+ " : "").append("§f").append(voucherGiven)
-                        .append(" 张").append(voucher.getDisplay());
+                msg.append(Msg.get("reward.voucher", "amount", voucherGiven, "name", voucher.getDisplay()));
             }
             p.sendMessage(msg.toString());
             break;
@@ -2235,22 +2233,22 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
      */
     public boolean salvagePokemon(Player p, int partySlot) {
         if (!this.isSalvageEnabled()) {
-            p.sendMessage("§3精灵合成 §f|| §c分解回收功能已关闭!");
+            p.sendMessage(Msg.get("salvage.disabled"));
             return false;
         }
         PlayerPartyStorage pps = Pixelmon.storageManager.getParty(p.getUniqueId());
         Pokemon pokemon = pps == null ? null : pps.get(partySlot);
         if (pokemon == null) {
-            p.sendMessage("§3精灵合成 §f|| §c所选精灵已不存在!");
+            p.sendMessage(Msg.get("common.pokemon-gone"));
             return false;
         }
         if (pokemon.isEgg()) {
-            p.sendMessage("§3精灵合成 §f|| §c精灵蛋无法分解!");
+            p.sendMessage(Msg.get("salvage.egg"));
             return false;
         }
         int star = this.getPokemonStar(pokemon.getSpecies().name());
         if (star < 1) {
-            p.sendMessage("§3精灵合成 §f|| §c该精灵未被星级系统收录, 无法分解!");
+            p.sendMessage(Msg.get("salvage.not-in-star-system"));
             return false;
         }
         int money = this.getSalvageMoney(star);
@@ -2271,10 +2269,9 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
             }
         }
 
-        StringBuilder msg = new StringBuilder("§3精灵合成 §f|| §a分解完成, 获得 §f")
-                .append(money).append(" §a金币");
+        StringBuilder msg = new StringBuilder(Msg.get("salvage.done", "money", money));
         if (granted > 0) {
-            msg.append(" §a+ §f").append(granted).append(" §a个").append(sticker.getDisplay());
+            msg.append(Msg.get("salvage.extra", "amount", granted, "name", sticker.getDisplay()));
         }
         msg.append("！");
         p.sendMessage(msg.toString());
@@ -2291,13 +2288,13 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
      */
     public boolean rerollAttr(Player p, int partySlot, int attr) {
         if (!this.isRerollEnabled()) {
-            p.sendMessage("§3精灵合成 §f|| §c洗练功能已关闭!");
+            p.sendMessage(Msg.get("reroll.disabled"));
             return false;
         }
         PlayerPartyStorage pps = Pixelmon.storageManager.getParty(p.getUniqueId());
         Pokemon pokemon = pps == null ? null : pps.get(partySlot);
         if (pokemon == null) {
-            p.sendMessage("§3精灵合成 §f|| §c所选精灵已不存在!");
+            p.sendMessage(Msg.get("common.pokemon-gone"));
             return false;
         }
 
@@ -2306,21 +2303,21 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
         int stickerAmount = sticker == null ? 0 : Math.max(this.getRerollStickerAmount(), 0);
         YSData ysd = this.ysdatas.get(p.getName());
         if (ysd == null) {
-            p.sendMessage("§3精灵合成 §f|| §c粘剂数据尚未加载, 请重新进服后再试!");
+            p.sendMessage(Msg.get("common.sticker-not-loaded"));
             return false;
         }
         if (price > 0) {
             if (this.economy == null) {
-                p.sendMessage("§3精灵合成 §f|| §c服务器经济服务不可用, 暂时无法洗练!");
+                p.sendMessage(Msg.get("reroll.economy-unavailable"));
                 return false;
             }
             if (this.economy.getBalance((OfflinePlayer) p) < (double) price) {
-                p.sendMessage("§3精灵合成 §f|| §c你没有足够的金币！");
+                p.sendMessage(Msg.get("common.lack-money"));
                 return false;
             }
         }
         if (stickerAmount > 0 && ysd.getAmount(sticker.getKey()) < stickerAmount) {
-            p.sendMessage("§3精灵合成 §f|| §c你没有足够的" + sticker.getInsufficient());
+            p.sendMessage(Msg.get("common.lack-sticker", "sticker", sticker.getInsufficient()));
             return false;
         }
 
@@ -2360,12 +2357,16 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
             if (stickerAmount > 0) {
                 ysd.deposit(sticker.getKey(), stickerAmount);
             }
-            p.sendMessage("§3精灵合成 §f|| §c洗练失败, 本次消耗已全额退还(可能是该精灵属性不可读)!");
+            p.sendMessage(Msg.get("reroll.refunded"));
             return false;
         }
 
-        p.sendMessage("§3精灵合成 §f|| §a洗练成功: " + detail + " §7(消耗 §f" + price + " §7金币"
-                + (stickerAmount > 0 ? " + " + stickerAmount + " 个" + sticker.getDisplay() : "") + "§7)");
+        p.sendMessage(Msg.get("reroll.ok",
+                "detail", detail,
+                "price", price,
+                "extra", stickerAmount > 0
+                        ? Msg.get("reroll.extra", "amount", stickerAmount, "name", sticker.getDisplay())
+                        : ""));
         this.playFeedback(p, "success");
         return true;
     }
@@ -2378,37 +2379,37 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
      */
     public boolean craftSticker(Player p, int recipeIndex) {
         if (!this.isStickerCraftEnabled()) {
-            p.sendMessage("§3精灵合成 §f|| §c粘剂合成功能已关闭!");
+            p.sendMessage(Msg.get("craft.disabled"));
             return false;
         }
         List<StickerRecipe> recipes = this.getStickerRecipes();
         if (recipeIndex < 0 || recipeIndex >= recipes.size()) {
-            p.sendMessage("§3精灵合成 §f|| §c配方不存在!");
+            p.sendMessage(Msg.get("craft.recipe-missing"));
             return false;
         }
         StickerRecipe recipe = recipes.get(recipeIndex);
         StickerType from = this.getStickerType(recipe.getFrom());
         StickerType to = this.getStickerType(recipe.getTo());
         if (from == null || to == null) {
-            p.sendMessage("§3精灵合成 §f|| §c配方引用了不存在的粘剂类型, 请检查配置!");
+            p.sendMessage(Msg.get("craft.recipe-invalid"));
             return false;
         }
         YSData ysd = this.ysdatas.get(p.getName());
         if (ysd == null) {
-            p.sendMessage("§3精灵合成 §f|| §c粘剂数据尚未加载, 请重新进服后再试!");
+            p.sendMessage(Msg.get("common.sticker-not-loaded"));
             return false;
         }
         if (ysd.getAmount(from.getKey()) < recipe.getAmount()) {
-            p.sendMessage("§3精灵合成 §f|| §c你没有足够的" + from.getInsufficient());
+            p.sendMessage(Msg.get("common.lack-sticker", "sticker", from.getInsufficient()));
             return false;
         }
         if (recipe.getMoney() > 0) {
             if (this.economy == null) {
-                p.sendMessage("§3精灵合成 §f|| §c服务器经济服务不可用, 暂时无法合成!");
+                p.sendMessage(Msg.get("compound.economy-unavailable"));
                 return false;
             }
             if (this.economy.getBalance((OfflinePlayer) p) < (double) recipe.getMoney()) {
-                p.sendMessage("§3精灵合成 §f|| §c你没有足够的金币！");
+                p.sendMessage(Msg.get("common.lack-money"));
                 return false;
             }
         }
@@ -2419,9 +2420,12 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
         }
         ysd.deposit(to.getKey(), recipe.getResult());
 
-        p.sendMessage("§3精灵合成 §f|| §a合成完成, 获得 §f" + recipe.getResult() + " §a个"
-                + stripLeadColor(to.getDisplay()) + " §7(消耗 §f" + recipe.getAmount() + " §7个"
-                + stripLeadColor(from.getDisplay()) + " §7+ §f" + recipe.getMoney() + " §7金币)");
+        p.sendMessage(Msg.get("craft.done",
+                "result", recipe.getResult(),
+                "to", stripLeadColor(to.getDisplay()),
+                "amount", recipe.getAmount(),
+                "from", stripLeadColor(from.getDisplay()),
+                "money", recipe.getMoney()));
         this.playFeedback(p, "success");
         this.addQuestProgress(p, QuestType.STICKER, 1);
         return true;
@@ -2438,6 +2442,15 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
         File config = new File(this.getDataFolder(), "config.yml");
         if (!config.exists()) {
             this.saveDefaultConfig();
+        }
+
+        // 文案要在任何界面/提示发出之前就载入 —— 否则首次进服的玩家会看到
+        // §c<missing:...>（那正是缺键时的显式标记，不是崩溃）。
+        Msg.load(this);
+        int msgMissing = Msg.customMissingCount();
+        if (msgMissing > 0) {
+            this.getLogger().info("messages.yml 有 " + msgMissing
+                    + " 条使用内置默认文案（可在 messages.yml 里覆盖）");
         }
 
         File data = new File(this.getDataFolder(), "Data");
@@ -2640,7 +2653,7 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
             // 顺带修的同类问题：原实现直接 (Player) sender，
             // 控制台敲 /pu compound 会抛 ClassCastException。
             if (!(sender instanceof Player)) {
-                sender.sendMessage("§b精灵信息 §f// §c该指令只能由玩家执行！");
+                sender.sendMessage(Msg.get("command.players-only"));
                 return true;
             }
             // 新增：是否需要权限由 config.yml 的 Compound.use-permission 决定
@@ -2660,6 +2673,8 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
             this.playerdatas.get(sendername).openGui((Player) sender);
         } else if (args[0].equalsIgnoreCase("reload") && sender.hasPermission("pokeutils.admin")) {
             this.reloadConfig();
+            // 文案同样是「改完想立刻看到效果」的东西，重载时一并重读 messages.yml。
+            Msg.load(this);
             // 修复：粘剂定义是按 config.yml 缓存过的，重载配置时必须一并失效，
             // 否则改了 Compound.stickers 要重启服务器才看得到效果。
             this.invalidateStickerTypes();
@@ -2904,7 +2919,7 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
             return;
         }
         if (!(sender instanceof Player)) {
-            sender.sendMessage("§b精灵信息 §f// §c该指令只能由玩家执行！");
+            sender.sendMessage(Msg.get("command.players-only"));
             return;
         }
         Player p = (Player) sender;
@@ -2924,7 +2939,7 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
             return;
         }
         if (!(sender instanceof Player)) {
-            sender.sendMessage("§b精灵信息 §f// §c该指令只能由玩家执行！");
+            sender.sendMessage(Msg.get("command.players-only"));
             return;
         }
         Player p = (Player) sender;
@@ -2944,7 +2959,7 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
             return;
         }
         if (!(sender instanceof Player)) {
-            sender.sendMessage("§b精灵信息 §f// §c该指令只能由玩家执行！");
+            sender.sendMessage(Msg.get("command.players-only"));
             return;
         }
         Player p = (Player) sender;
@@ -2964,7 +2979,7 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
             return;
         }
         if (!(sender instanceof Player)) {
-            sender.sendMessage("§b精灵信息 §f// §c该指令只能由玩家执行！");
+            sender.sendMessage(Msg.get("command.players-only"));
             return;
         }
         Player p = (Player) sender;
@@ -2984,7 +2999,7 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
             return;
         }
         if (!(sender instanceof Player)) {
-            sender.sendMessage("§b精灵信息 §f// §c该指令只能由玩家执行！");
+            sender.sendMessage(Msg.get("command.players-only"));
             return;
         }
         Player p = (Player) sender;
@@ -3474,7 +3489,8 @@ public class PokeUtils extends JavaPlugin implements TabCompleter {
                 + this.stickerDisplay(type) + "§7 现在为 §f" + after
                 + " §7(" + (give ? "+" : "-") + amount + ")");
         if (online != null) {
-            online.sendMessage("§3精灵合成 §f|| §e你的 " + this.stickerDisplay(type) + "§e 数量已变更为 §f" + after);
+            online.sendMessage(Msg.get("compound.sticker-changed",
+                    "sticker", this.stickerDisplay(type), "after", after));
         }
     }
 

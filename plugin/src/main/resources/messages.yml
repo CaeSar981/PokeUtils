@@ -1,0 +1,135 @@
+# ===========================================================================
+#  PokeUtils 文案
+#
+#  改这里不需要重新编译，保存后执行 /pu reload 即可生效。
+#
+#  约定：
+#    · 颜色码用 § 或 & 都行（&会被自动转换）。
+#    · {xxx} 是占位符，由插件在运行时填入；缺占位符时该处显示为空。
+#    · 本文件删掉某一行不会报错 —— 会回落到 jar 内置的默认文案（所以升级插件后
+#      新增的条目不必手动补）。若某个 key 连内置默认都没有，游戏里会显示
+#      §c<missing:key>，一眼就能看到，不会静默变成空白。
+# ===========================================================================
+
+# 玩家侧消息的两套开头。改这一行就能统一换掉所有前缀。
+prefix: "§3精灵合成 §f|| "
+admin-prefix: "§b精灵信息 §f// "
+
+# ---------------------------------------------------------------------------
+#  通用（在多个功能里重复出现的句子，只放这里一份）
+# ---------------------------------------------------------------------------
+common:
+  pokemon-gone: "{prefix}§c所选精灵已不存在!"
+  sticker-not-loaded: "{prefix}§c粘剂数据尚未加载, 请重新进服后再试!"
+  lack-money: "{prefix}§c你没有足够的金币！"
+  # {sticker} 是粘剂自定义名称（配置里 display 那段，自带颜色）
+  lack-sticker: "{prefix}§c你没有足够的{sticker}"
+  storage-not-ready: "{prefix}§c存储尚未就绪, 无法领取!"
+
+# ---------------------------------------------------------------------------
+#  合成
+# ---------------------------------------------------------------------------
+compound:
+  # {feature} 会被替换成具体功能名（如「分解回收」）
+  feature-disabled: "{prefix}§c{feature}功能已关闭!"
+  processing: "{prefix}§e上一次操作还在处理中, 请稍候！"
+  too-fast: "{prefix}§e操作太快了, 请稍后再试！"
+  material-gone: "{prefix}§c所选槽位上的精灵已不存在, 请重新选择!"
+  material-replaced: "{prefix}§c{slot}的精灵已被替换, 请重新选择材料!"
+  not-in-star-system: "{prefix}§c所选精灵未被星级系统收录, 无法参与合成!"
+  party-need-equip: "{prefix}§c背包最少需要装备{need}只精灵!"
+  party-keep-one: "{prefix}§c队伍里的精灵不足以支撑本次合成, 至少要保留一只!"
+  confirm-consume: "{prefix}§c本次将消耗两只 {star} 星精灵, 请再点击一次「确认合成」以确认操作！"
+  empty-pool: "{prefix}§c目标 {star} 星档位的产出池为空, 已中止合成, 未扣除任何物品!"
+  economy-unavailable: "{prefix}§c服务器经济服务不可用, 暂时无法合成!"
+  over-six-star: "{prefix}§c精灵星级不能超过六星！"
+  star-mismatch: "{prefix}§c两只精灵星级不同"
+  not-selected: "{prefix}§c未选择齐精灵/合成粘剂"
+  already-selected: "{prefix}§c该精灵已在其他槽位选择！"
+  need-one-pokemon: "{prefix}§c最少必须有一只精灵！"
+  inherit-limit: "{prefix}§c最多只能同时继承 {max} 项, 请先取消其它项!"
+  pity-triggered: "{prefix}§e已连续失败 §f{streak} §e次, 本次触发保底, 必定成功！"
+  success: "{prefix}§a成功合成一只 {star} §a, 精灵已发放至精灵槽！"
+  protect-saved: "{prefix}§e保护符生效, 两只材料精灵已保留！"
+  god-saved: "{prefix}§e来自众神的祝福, 保留住了一只精灵！"
+  voucher-dropped: "{prefix}§e背包已满, 合成券已掉落在你脚下。"
+  sticker-changed: "{prefix}§e你的 {sticker}§e 数量已变更为 §f{after}"
+  # 失败提示由三段拼成，方便按补偿种类增减
+  fail-base: "{prefix}§c本次合成精灵失败"
+  fail-money: ", 补偿合成所耗金币的{percent}%"
+  fail-sticker: ", 并返还 {amount} 个{sticker}"
+
+# ---------------------------------------------------------------------------
+#  每日委托
+# ---------------------------------------------------------------------------
+quest:
+  not-exist: "{prefix}§c该委托不存在!"
+  not-delivery-type: "{prefix}§c该委托不存在或不是交付类委托!"
+  claimed: "{prefix}§c这条委托已经领取过了!"
+  need-star: "{prefix}§c这条委托需要 {required} 及以上的精灵, 你选的是 {actual}!"
+  delivered: "{prefix}§a已交付 {star} 精灵, 委托完成并领取奖励!"
+  submit-in-gui: "{prefix}§c这条是交付类委托, 请在界面上选择要交付的精灵!"
+  not-finished: "{prefix}§c这条委托还没完成 (§f{progress}§c/§f{target}§c)!"
+  reward-claimed: "{prefix}§a委托奖励已领取!"
+  reward-got: "{prefix}§a获得委托奖励: "
+  storage-not-ready: "{prefix}§c存储尚未就绪, 无法领取!"
+
+# 奖励拼接用的名词。{amount} {name} 分别替换成数量与物品名。
+reward:
+  money: "§f{amount} §a金币"
+  sticker: "§a+ §f{amount} §a个{name}"
+  voucher: "§a+ §f{amount} §a张{name}"
+  joiner: " §a+ "
+
+# ---------------------------------------------------------------------------
+#  合成图鉴
+# ---------------------------------------------------------------------------
+dex:
+  lack: "{prefix}§c图鉴还差 §f{left} §c种精灵才能领取这个奖励!"
+  claimed: "{prefix}§c这个图鉴奖励已经领取过了!"
+  reward-got: "{prefix}§a图鉴奖励已领取: "
+
+# ---------------------------------------------------------------------------
+#  分解回收
+# ---------------------------------------------------------------------------
+salvage:
+  disabled: "{prefix}§c分解回收功能已关闭!"
+  pokemon-gone: "{prefix}§c所选精灵已不存在!"
+  egg: "{prefix}§c精灵蛋无法分解!"
+  not-in-star-system: "{prefix}§c该精灵未被星级系统收录, 无法分解!"
+  done: "{prefix}§a分解完成, 获得 §f{money} §a金币"
+  extra: " §a+ §f{amount} §a个{name}"
+
+# ---------------------------------------------------------------------------
+#  洗练
+# ---------------------------------------------------------------------------
+reroll:
+  disabled: "{prefix}§c洗练功能已关闭!"
+  pokemon-gone: "{prefix}§c所选精灵已不存在!"
+  economy-unavailable: "{prefix}§c服务器经济服务不可用, 暂时无法洗练!"
+  refunded: "{prefix}§c洗练失败, 本次消耗已全额退还(可能是该精灵属性不可读)!"
+  ok: "{prefix}§a洗练成功: {detail} §7(消耗 §f{price} §7金币{extra}§7)"
+  extra: " + {amount} 个{name}"
+
+# ---------------------------------------------------------------------------
+#  粘剂合成
+# ---------------------------------------------------------------------------
+craft:
+  disabled: "{prefix}§c粘剂合成功能已关闭!"
+  recipe-missing: "{prefix}§c配方不存在!"
+  recipe-invalid: "{prefix}§c配方引用了不存在的粘剂类型, 请检查配置!"
+  done: "{prefix}§a合成完成, 获得 §f{result} §a个{to} §7(消耗 §f{amount} §7个{from} §7+ §f{money} §7金币)"
+
+# ---------------------------------------------------------------------------
+#  存储告警（玩家进服时如果存储没按预期工作）
+# ---------------------------------------------------------------------------
+storage:
+  warn-header: "§c[PokeUtils] 存储没有按预期工作："
+  warn-line: "§c  {warning}"
+  warn-hint: "§7  用 §f/pu storage §7查看当前状态；在此之前不要做重要的发放或扣减。"
+
+# ---------------------------------------------------------------------------
+#  命令通用
+# ---------------------------------------------------------------------------
+command:
+  players-only: "{admin-prefix}§c该指令只能由玩家执行！"
