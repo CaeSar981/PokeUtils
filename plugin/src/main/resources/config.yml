@@ -80,6 +80,55 @@ Compound:
       rate: 30
       insufficient: "§a 精良粘剂"
 
+    - key: BH
+      display: "§c保护符"
+      material: TOTEM_OF_UNDYING
+      rate: 0
+      insufficient: "§c保护符"
+      protect: true
+    - key: XL
+      display: "§c定向粘剂 · 水系"
+      material: PRISMARINE_CRYSTALS
+      rate: 0
+      insufficient: "§c定向粘剂 · 水系"
+      pool: [Squirtle, Wartortle, Blastoise, Psyduck, Golduck, Magikarp, Gyarados, Lapras, Vaporeon, Staryu, Starmie, Seel, Dewgong, Horsea, Seadra, Kingdra, Poliwag, Poliwhirl, Poliwrath, Politoed, Wooper, Quagsire, Marill, Azumarill, Lotad, Lombre, Ludicolo, Wingull, Pelipper, Surskit, Masquerain, Corphish, Crawdaunt, Feebas, Milotic, Spheal, Sealeo, Walrein, Clamperl, Huntail, Gorebyss, Luvdisc, Buizel, Floatzel, Shellos, Gastrodon, Finneon, Lumineon, Mantyke, Mantine]
+    - key: HUO
+      display: "§c定向粘剂 · 火系"
+      material: BLAZE_POWDER
+      rate: 0
+      insufficient: "§c定向粘剂 · 火系"
+      pool: [Charmander, Charmeleon, Charizard, Vulpix, Ninetales, Growlithe, Arcanine, Ponyta, Rapidash, Magmar, Magmortar, Flareon, Moltres, Cyndaquil, Quilava, Typhlosion, Houndour, Houndoom, Torchic, Combusken, Blaziken, Numel, Camerupt, Torkoal, Chimchar, Monferno, Infernape, Heatran, Tepig, Pignite, Emboar, Darumaka, Darmanitan, Litwick, Lampent, Chandelure, Larvesta, Volcarona, Fennekin, Braixen, Delphox, Fletchling, Fletchinder, Talonflame, Litleo, Pyroar, Salandit, Salazzle, Turtonator, Scorbunny, Raboot, Cinderace]
+    - key: DIAN
+      display: "§c定向粘剂 · 电系"
+      material: REDSTONE
+      rate: 0
+      insufficient: "§c定向粘剂 · 电系"
+      pool: [Pikachu, Raichu, Voltorb, Electrode, Electabuzz, Electivire, Jolteon, Zapdos, Chinchou, Lanturn, Mareep, Flaaffy, Ampharos, Elekid, Raikou, Electrike, Manectric, Plusle, Minun, Shinx, Luxio, Luxray, Pachirisu, Blitzle, Zebstrika, Emolga, Joltik, Galvantula, Tynamo, Eelektrik, Eelektross, Helioptile, Heliolisk, Dedenne, Togedemaru, Vikavolt, Zeraora]
+    - key: LONG
+      display: "§c定向粘剂 · 龙系"
+      material: ENDER_PEARL
+      rate: 0
+      insufficient: "§c定向粘剂 · 龙系"
+      pool: [Dratini, Dragonair, Dragonite, Bagon, Shelgon, Salamence, Gible, Gabite, Garchomp, Axew, Fraxure, Haxorus, Druddigon, Deino, Zweilous, Hydreigon, Reshiram, Zekrom, Kyurem, Goomy, Sliggoo, Goodra, Noibat, Noivern, Tyrunt, Tyrantrum, Drampa, Applin, Flapple, Appletun, Dracovish, Duraludon, Regidrago]
+    - key: CHAO
+      display: "§c定向粘剂 · 超能力系"
+      material: ENDER_EYE
+      rate: 0
+      insufficient: "§c定向粘剂 · 超能力系"
+      pool: [Abra, Kadabra, Alakazam, Drowzee, Hypno, Mewtwo, Mew, Natu, Xatu, Espeon, Slowpoke, Slowbro, Slowking, Unown, Wobbuffet, Girafarig, Ralts, Kirlia, Gardevoir, Gallade, Meditite, Medicham, Spoink, Grumpig, Lunatone, Solrock, Baltoy, Claydol, Chimecho, Wynaut, Latias, Latios, Jirachi, Deoxys, Chingling, Chimecho, Bronzor, Bronzong, Uxie, Mesprit, Azelf, Cresselia, Gothita, Gothorita, Gothitelle, Solosis, Duosion, Reuniclus, Elgyem, Beheeyem]
+    - key: YOUL
+      display: "§c定向粘剂 · 幽灵系"
+      material: BONE
+      rate: 0
+      insufficient: "§c定向粘剂 · 幽灵系"
+      pool: [Gastly, Haunter, Gengar, Misdreavus, Mismagius, Shuppet, Banette, Duskull, Dusclops, Dusknoir, Sableye, Shedinja, Drifloon, Drifblim, Spiritomb, Rotom, Giratina, Yamask, Cofagrigus, Litwick, Lampent, Chandelure, Frillish, Jellicent, Golett, Golurk, Phantump, Trevenant, Pumpkaboo, Gourgeist, Mimikyu, Dhelmise, Polteageist, Sinistea]
+    - key: GANG
+      display: "§c定向粘剂 · 钢系"
+      material: IRON_INGOT
+      rate: 0
+      insufficient: "§c定向粘剂 · 钢系"
+      pool: [Magnemite, Magneton, Magnezone, Steelix, Scizor, Skarmory, Mawile, Aron, Lairon, Aggron, Beldum, Metang, Metagross, Registeel, Jirachi, Bronzor, Bronzong, Lucario, Shieldon, Bastiodon, Dialga, Empoleon, Excadrill, Escavalier, Ferroseed, Ferrothorn, Klink, Klang, Klinklang, Honedge, Doublade, Aegislash, Klefki, Togedemaru, Corviknight, Duraludon]
+
   # 合成失败时，返还已消耗金币的百分比。
   # 注：只有 Compound.refund.mode 含「money」时才生效。
   refund-percent: 20
@@ -118,13 +167,19 @@ Compound:
     # 示例（按需要打开）：
     #   1: 3      # 低星档失败不心疼，保底来得快一点，维持正向反馈
     #   6: 8      # 六星档一次 100 万，玩家对连败的耐受度完全不同
-    threshold-by-star: {}
+    threshold-by-star:
+      1: 3
+      2: 4
+      3: 4
+      4: 5
+      5: 6
+      6: 8
     # 失败后的进度提示方式（本次新增）：
     #   chat      聊天栏消息（默认）
     #   actionbar 物品栏上方的动作栏文字（走反射，服务端不支持时自动回落 chat）
     #   both      两者都发
     #   none      不提示
-    notify: chat
+    notify: both
     # 占位符: {streak} 当前连败次数 / {threshold} 保底阈值 / {left} 还差几次
     message: "§e连续失败 §f{streak} §e/ §f{threshold} §7· 再失败 §f{left} §7次必定成功"
 
@@ -318,6 +373,44 @@ Compound:
         amount: 3
         result: 1
         money: 5000
+      # 定向粘剂 → 普通粘剂（回收出口）：让打工攒下的定向粘剂有明确去处，
+      # 不需要的那几系可以换回能加成功率的普通粘剂 PT。
+      # 比例 2:1 + 2000 金币；保护符 BH 不在此列（它是六转七的保命道具，回收会贬值）。
+      - from: HUO
+        to: PT
+        amount: 2
+        result: 1
+        money: 2000
+      - from: DIAN
+        to: PT
+        amount: 2
+        result: 1
+        money: 2000
+      - from: CHAO
+        to: PT
+        amount: 2
+        result: 1
+        money: 2000
+      - from: GANG
+        to: PT
+        amount: 2
+        result: 1
+        money: 2000
+      - from: XL
+        to: PT
+        amount: 2
+        result: 1
+        money: 2000
+      - from: YOUL
+        to: PT
+        amount: 2
+        result: 1
+        money: 2000
+      - from: LONG
+        to: PT
+        amount: 2
+        result: 1
+        money: 2000
 
   # ======================================================================
   #  【第四轮新增 · 每日委托】给玩家一个「今天上来要干什么」的理由
